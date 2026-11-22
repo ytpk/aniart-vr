@@ -127,7 +127,7 @@ adb logcat -v threadtime -T 1 -s AniartDepth tflite LiteRT onnxruntime adsprpc c
 - **Limbo V3:** исходный FP32 и экспериментальный CPU-вариант с динамическим INT8 для MatMul с постоянными весами. Бенчмарк APK включает обе версии. Вариант INT8 собран из исходных весов скриптом `tools/quantize_depth.py`. [Limbo V3 от NevermindNilas и условия CC BY-NC 4.0](https://github.com/NevermindNilas/Ai-models/blob/4c0950ecc08629cda85754d0766d6deb2e95495a/Limbo-V3/LICENSE.MD)
 - **Video Depth Anything:** исходная потоковая модель FP16 на CPU для сравнения.
 
-Для локальной сборки с весами Limbo установите `onnxruntime==1.24.3`, `onnx==1.23.2` и `numpy==2.5.5`, затем запустите `ANIART_DEPTH_BENCH=1 ./build.sh`. GitHub Actions собирает этот APK для некоммерческого тестирования. При запуске диагностики без видео используется синтетический кадр и дополнительно запускаются тесты Qualcomm QNN HTP. [QNN Execution Provider](https://onnxruntime.ai/docs/execution-providers/QNN-ExecutionProvider.html) · [Лицензия Qualcomm](overlay/src/main/assets/licenses/qnn/LICENSE.pdf) · [Уведомления Qualcomm](overlay/src/main/assets/licenses/qnn/NOTICE.txt)
+Для локальной сборки с весами Limbo установите `onnxruntime==1.24.3`, `onnx==1.23.2` и `numpy==2.5.5`, затем запустите `ANIART_DEPTH_BENCH=1 ./build.sh`. GitHub Actions собирает этот APK для некоммерческого тестирования. При запуске диагностики без видео используется синтетический кадр. В QNN-сборке без видео дополнительно запускаются тесты Qualcomm QNN HTP. [QNN Execution Provider](https://onnxruntime.ai/docs/execution-providers/QNN-ExecutionProvider.html) · [Лицензия Qualcomm](overlay/src/main/assets/licenses/qnn/LICENSE.pdf) · [Уведомления Qualcomm](overlay/src/main/assets/licenses/qnn/NOTICE.txt)
 
 Веса ZipDepth и Video Depth Anything скачиваются при сборке и проверяются по SHA-256. Если на Quest нет файлового менеджера для импорта Limbo, в debug-сборке можно загрузить файл через ADB и снова выбрать Limbo V3:
 
@@ -135,6 +135,16 @@ adb logcat -v threadtime -T 1 -s AniartDepth tflite LiteRT onnxruntime adsprpc c
 adb shell am force-stop dev.aniart.vr
 adb shell 'run-as dev.aniart.vr sh -c "cat > files/LimboV3_504x280_fp32.onnx"' < LimboV3_504x280_fp32.onnx
 ```
+
+В 0.7.1 benchmark APK использует ONNX Runtime Android с WebGPU. Limbo и Video Depth Anything имеют отдельные GPU-режимы и тесты без CPU fallback. Если сессию создать невозможно, журнал сохраняет ошибку провайдера. Вариант для проверки Hexagon по-прежнему собирается через `./build.sh -PaniartQnn=true`.
+
+В **2D → 3D** кнопка стереорежима переключает обычный сдвиг, уменьшенный сдвиг возле резких границ глубины и просмотр текущей карты глубины в обоих глазах. Записи `Live` показывают время расчёта, сброс при переключении модели, перемотке или смене сцены, изменение низкочастотного изображения и среднее изменение карты между рассчитанными кадрами. Последняя величина включает движение в видео.
+
+#### Порт на LiteRT
+
+ZipDepth использует классический делегат LiteRT. Для родственной Limbo модели DA3 Small опубликован экспорт FP16 для нового API LiteRT **CompiledModel** с отдельным GPU-ускорителем. Классический делегат в опубликованном тесте DA3 на Pixel 8a взял 144 из 1460 операций, тогда как CompiledModel на том же устройстве делегировал весь граф. Использовать тот же делегат, что у ZipDepth, для обычного конвертированного Limbo недостаточно. [Экспорт DA3 Small и замеры](https://huggingface.co/litert-community/Depth-Anything-3-Small)
+
+Для Limbo исходником конвертации служит `Limbo.safetensors`. Публичный скрипт DA3 принимает фиксированные H и W, поэтому сначала стоит проверить 280×504 и сверить вывод с ONNX на одинаковом кадре. В текущем ONNX Limbo есть ScatterND, ConvTranspose и Resize. Скрипт DA3 заменяет соответствующие операции на совместимые с GPU эквиваленты, включая вставку токена через конкатенацию и транспонированную свёртку через обычную. Для Video Depth Anything потребуются отдельные экспорты энкодера, первого и потокового проходов. В потоковом графе восемь входов кэша. При замере надо учитывать их перенос и повторную подачу. [Скрипт конвертации DA3](https://huggingface.co/litert-community/Depth-Anything-3-Small/blob/5cd25d936e3fde2edef68f53b4123401454ac9c8/convert_da3.py) · [Веса Limbo](https://github.com/NevermindNilas/Ai-models/tree/4c0950ecc08629cda85754d0766d6deb2e95495a/Limbo-V3)
 
 ### Apple Depth Pro 2
 

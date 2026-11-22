@@ -81,7 +81,7 @@ uniform float depthBlend;
 uniform mat4 transform;
 uniform vec4 crop;
 uniform vec2 inset;
-uniform int operation, post;
+uniform int operation, post, stereoView;
 uniform vec2 sourceTexel;
 uniform float shift;
 in vec2 uv;
@@ -157,9 +157,23 @@ void main() {
         return;
     }
     vec2 p = uv;
+    if (stereoView == 2) {
+        float d = texture(depthMap, uv).r;
+        color = vec4(vec3(d), 1.0);
+        return;
+    }
     if (shift != 0.0) {
         float mask = smoothstep(0.0, .06, min(uv.x, 1.0 - uv.x));
-        float disparity = clamp((mix(texture(priorDepth, uv).r, texture(depthMap, uv).r, depthBlend) - .5) * 1.65, -.45, .45);
+        float depth = mix(texture(priorDepth, uv).r, texture(depthMap, uv).r, depthBlend);
+        float disparity = clamp((depth - .5) * 1.65, -.45, .45);
+        if (stereoView == 1) {
+            vec2 stepX = vec2(1.0 / 192.0, 0.0);
+            float center = texture(depthMap, uv).r;
+            float boundary = max(abs(texture(depthMap, uv - stepX).r - center),
+                                 abs(texture(depthMap, uv + stepX).r - center));
+            // Limit warping where nearby pixels have conflicting depth.
+            disparity *= mix(.75, .24, smoothstep(.045, .22, boundary));
+        }
         p.x += shift * disparity * mask;
     }
     if (operation == 2 && abs(uv.x - .5) < .0016) {
@@ -276,7 +290,7 @@ void main() {
         glUniformMatrix4fv(glGetUniformLocation(program, name), 1, GL_FALSE, matrix);
     }
 
-    void UseVideo(const XrMatrix4x4f& mvp, int layout, int view, int operation, float shift, int post = 0) {
+    void UseVideo(const XrMatrix4x4f& mvp, int layout, int view, int operation, float shift, int post = 0, int stereoView = 0) {
         glUseProgram(video);
         Matrix(video, "mvp", mvp.m);
         Matrix(video, "transform", transform);
@@ -286,6 +300,7 @@ void main() {
         glUniform2f(glGetUniformLocation(video, "inset"), .5f / sourceW, .5f / sourceH);
         glUniform1i(glGetUniformLocation(video, "operation"), operation);
         glUniform1i(glGetUniformLocation(video, "post"), post);
+        glUniform1i(glGetUniformLocation(video, "stereoView"), stereoView);
         glUniform2f(glGetUniformLocation(video, "sourceTexel"),
                     (layout == 1 ? 2.f : 1.f) / sourceW, (layout == 2 ? 2.f : 1.f) / sourceH);
         glUniform1f(glGetUniformLocation(video, "shift"), shift);
@@ -293,7 +308,7 @@ void main() {
         glActiveTexture(GL_TEXTURE3);
         glBindTexture(GL_TEXTURE_2D, shift != 0 ? (hasPriorDepth ? priorDepth : depth) : 0);
         glActiveTexture(GL_TEXTURE2);
-        glBindTexture(GL_TEXTURE_2D, shift != 0 ? depth : 0);
+        glBindTexture(GL_TEXTURE_2D, shift != 0 || stereoView == 2 ? depth : 0);
         glActiveTexture(GL_TEXTURE1);
         glBindTexture(GL_TEXTURE_2D, operation == 1 || operation == 2 ? textures[5 + view] : 0);
         glActiveTexture(GL_TEXTURE0);
@@ -632,7 +647,7 @@ public:
         }
         const bool fast = config & 8;
         const bool parallax = ((config >> 5) & 7) == 3;
-        const int newModel = parallax ? (config >> 24) & 7 : 0;
+        const int newModel = parallax ? (config >> 24) & 15 : 0;
         if (depthModel != newModel || format < 0) {
             depthModel = newModel;
             depthReady = false;
@@ -776,7 +791,9 @@ public:
             const int operation = filtered && filteredLayout == layout ? ((config & 16) ? 2 : 1) : 0;
             const float scale = depthModel == 0 ? .00125f : .003f * depthStrength;
             const float shift = depthReady ? (view ? 1 : -1) * ((config >> 9) & 15) * scale : 0;
-            UseVideo(QuadMatrix(vp, screen, actualWidth, h, front), layout, layout ? view : 0, operation, shift, (config >> 18) & 3);
+            const int stereoView = depthReady ? (config >> 28) & 3 : 0;
+            UseVideo(QuadMatrix(vp, screen, actualWidth, h, front), layout, layout ? view : 0,
+                     operation, shift, (config >> 18) & 3, stereoView);
             glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
         } else {
             Quad(vp, screen, actualWidth, h, front, 0);

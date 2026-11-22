@@ -5,6 +5,7 @@ import android.system.Os;
 import android.util.Log;
 import ai.onnxruntime.OnnxTensor;
 import ai.onnxruntime.OrtEnvironment;
+import ai.onnxruntime.OrtProvider;
 import ai.onnxruntime.OrtSession;
 import java.io.File;
 import java.io.FileOutputStream;
@@ -60,7 +61,8 @@ final class DepthModels {
     private int loaded, previousEpoch = -1;
     private float[] lastSignature;
     private float low, high, shotMedian;
-    private byte[] lastFrame;
+    private byte[] lastFrame, lastLiveMap;
+    private int liveMapCount;
     private static final byte[] REUSED_FRAME = {2};
 
     DepthModels(Context context) { this.context = context; }
@@ -74,6 +76,8 @@ final class DepthModels {
             case 5 -> "ZipDepth CPU Quant";
             case 6 -> "ZipDepth CPU Wide";
             case 7 -> "Limbo V3 CPU INT8";
+            case 8 -> "Limbo V3 GPU · WebGPU";
+            case 9 -> "Video Depth Anything GPU";
             default -> "По яркости";
         };
     }
@@ -162,9 +166,17 @@ final class DepthModels {
                 passed += checkBackend("Video Depth Anything CPU", () -> loadCpu(3), rgba, 2);
                 passed += checkBackend("Limbo V3 CPU FP32", () -> loadCpu(2), rgba, 3);
                 passed += checkBackend("Limbo V3 CPU dynamic INT8 MatMul",
-                        () -> loadLimbo(LIMBO_INT8), rgba, 3);
-                String htp = video ? "" : " · QNN HTP: " + checkHtpDiagnostics();
-                report.accept("Глубина " + passed + "/7" + htp);
+                        () -> loadLimbo(LIMBO_INT8, false), rgba, 3);
+                if (OrtEnvironment.getAvailableProviders().contains(OrtProvider.WEBGPU)) {
+                    passed += checkBackend("Limbo V3 WebGPU", () -> loadLimbo(LIMBO_FILE, true), rgba, 3);
+                    passed += checkBackend("Video Depth Anything WebGPU", () -> loadVideo(true), rgba, 2);
+                    report.accept("Глубина " + passed + "/9 · см. AniartDepth");
+                } else {
+                    Log.i("AniartDepth", "WebGPU unavailable in this ONNX Runtime");
+                    String htp = !video && OrtEnvironment.getAvailableProviders().contains(OrtProvider.QNN)
+                            ? " · QNN HTP: " + checkHtpDiagnostics() : "";
+                    report.accept("Глубина " + passed + "/7" + htp);
+                }
             } catch (Exception | LinkageError error) {
                 Log.w("AniartDepth", "Diagnostics failed", error);
                 report.accept("Ошибка диагностики. См. AniartDepth");
@@ -327,6 +339,7 @@ final class DepthModels {
                     backend.reset();
                     previousEpoch = job;
                 }
+                float sourceDelta = reset ? 0 : meanDelta(lastSignature, signature);
                 lastSignature = signature;
                 float[] values;
                 try {
@@ -340,13 +353,20 @@ final class DepthModels {
                     values = backend.infer(rgba);
                 }
                 byte[] map = normalize(values, backend.width, backend.height - 2 * backend.contentPadding(),
-                        model == 2 || model == 7, reset, model == 3);
+                        model == 2 || model == 7 || model == 8, reset, model == 3 || model == 9);
+                long elapsed = (System.nanoTime() - started) / 1_000_000;
+                if (reset || ++liveMapCount % 32 == 0) {
+                    float mapDelta = reset || lastLiveMap == null ? 0 : mapDelta(lastLiveMap, map);
+                    Log.i("AniartDepth", "Live " + label(model) + " | " + elapsed
+                            + " ms | cut/reset=" + reset + " | image delta=" + sourceDelta + " | map delta=" + mapDelta);
+                }
+                lastLiveMap = map;
                 lastFrame = rgba.clone();
                 byte[] packet = Arrays.copyOf(map, map.length + 1);
                 packet[map.length] = (byte) (reset ? 1 : 0);
                 if (job == epoch && !closed) {
                     result.set(new MapFrame(job, packet));
-                    update(job, (isZipGpu() ? "GPU " : "CPU ")
+                    update(job, (isZipGpu() || model >= 8 ? "GPU " : "CPU ")
                             + Math.round((System.nanoTime() - started) / 1_000_000.0) + " мс");
                 }
             } catch (Exception | LinkageError error) {
@@ -396,14 +416,20 @@ final class DepthModels {
             case 4 -> new ZipLiteBackend(modelAsset(ZIP_GPU), true, true, false);
             case 5 -> loadCpu(1);
             case 6 -> new ZipLiteBackend(modelAsset(ZIP_GPU), true, false, false);
-            case 7 -> loadLimbo(LIMBO_INT8);
+            case 7 -> loadLimbo(LIMBO_INT8, false);
+            case 8 -> loadLimbo(LIMBO_FILE, true);
+            case 9 -> loadVideo(true);
             default -> loadCpu(model);
         };
     }
 
     private Backend loadCpu(int model) throws Exception {
         if (model == 1) return new ZipLiteBackend(modelAsset(ZIP_CPU), false, false, false);
-        if (model == 2) return loadLimbo(LIMBO_FILE);
+        if (model == 2) return loadLimbo(LIMBO_FILE, false);
+        return loadVideo(false);
+    }
+
+    private Backend loadVideo(boolean gpu) throws Exception {
         OrtEnvironment ort = OrtEnvironment.getEnvironment();
         try (var options = new OrtSession.SessionOptions()) {
             options.setIntraOpNumThreads(2);
@@ -411,6 +437,7 @@ final class DepthModels {
             // Extended optimizations fuse the encoder's FP16 graph into com.microsoft.Gelu.
             // The ARM64 CPU provider in our Android build only has an FP32 kernel for that fusion.
             options.setOptimizationLevel(OrtSession.SessionOptions.OptLevel.BASIC_OPT);
+            if (gpu) enableWebGpu(options);
             return new VideoBackend(ort, options, modelAsset("encoder_fp16.onnx"),
                     modelAsset("bootstrap_fp16.onnx"), modelAsset("stream_fp16.onnx"));
         }
@@ -424,11 +451,12 @@ final class DepthModels {
         }
     }
 
-    private Backend loadLimbo(String asset) throws Exception {
+    private Backend loadLimbo(String asset, boolean gpu) throws Exception {
         var ort = OrtEnvironment.getEnvironment();
         try (var options = new OrtSession.SessionOptions()) {
             options.setIntraOpNumThreads(2);
             options.setInterOpNumThreads(1);
+            if (gpu) enableWebGpu(options);
             if (hasAsset(asset)) {
                 return new Backend(ort, 504, 280, true, "image", ort.createSession(modelAsset(asset), options));
             }
@@ -436,6 +464,11 @@ final class DepthModels {
             if (!asset.equals(LIMBO_FILE) || !validLimbo(file)) throw new MissingWeights();
             return new Backend(ort, options, 504, 280, true, "image", file);
         }
+    }
+
+    private static void enableWebGpu(OrtSession.SessionOptions options) throws ai.onnxruntime.OrtException {
+        options.addConfigEntry("session.disable_cpu_ep_fallback", "1");
+        options.addWebGPU(Map.of());
     }
 
     private ByteBuffer modelAsset(String file) throws IOException {
@@ -789,10 +822,19 @@ final class DepthModels {
         return result;
     }
 
-    private static boolean isCut(float[] before, float[] now) {
-        if (before == null) return true;
+    private static float mapDelta(byte[] before, byte[] now) {
+        int sum = 0;
+        for (int i = 0; i < now.length; i++) sum += Math.abs((now[i] & 255) - (before[i] & 255));
+        return sum / (255f * now.length);
+    }
+
+    private static float meanDelta(float[] before, float[] now) {
         float diff = 0;
         for (int i = 0; i < now.length; i++) diff += Math.abs(now[i] - before[i]);
-        return diff / now.length > .24f;
+        return diff / now.length;
+    }
+
+    private static boolean isCut(float[] before, float[] now) {
+        return before == null || meanDelta(before, now) > .24f;
     }
 }

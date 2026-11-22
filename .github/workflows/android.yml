@@ -55,10 +55,6 @@ jobs:
           import sys
           from zipfile import ZIP_STORED, ZipFile
           with ZipFile(sys.argv[1]) as apk:
-              for lib in ("libQnnHtp.so", "libQnnHtpV69Skel.so", "libQnnHtpV69Stub.so"):
-                  apk.getinfo("lib/arm64-v8a/" + lib)
-              for doc in ("LICENSE.pdf", "NOTICE.txt"):
-                  apk.getinfo("assets/licenses/qnn/" + doc)
               for model in ("zipdepth-wide-320x180-t320x192-edgepad-gpu.tflite", "zipdepth-base-256-cpu.tflite",
                             "encoder_fp16.onnx", "bootstrap_fp16.onnx", "stream_fp16.onnx", "qnn-htp-probe.onnx",
                             "LimboV3_504x280_fp32.onnx", "limbo-v3-cpu-dynamic-int8.onnx"):

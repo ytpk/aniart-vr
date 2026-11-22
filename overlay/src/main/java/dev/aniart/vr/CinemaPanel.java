@@ -54,7 +54,7 @@ final class CinemaPanel {
     private boolean favoritesOnly, keyboard, cyrillic = true;
     private String search = "";
     private int stereo, depth, screenSize;
-    private int depthModel;
+    private int depthModel, stereoView;
     private String depthStatus = "";
     private boolean antialias, deband, dehalo, darkRoom, smoothLaser, prefer90;
     private boolean eyeMsaa;
@@ -83,7 +83,8 @@ final class CinemaPanel {
         comparison = preferences.getBoolean("comparison", false);
         reverse = preferences.getBoolean("reverse_eyes", false);
         depth = Math.max(0, Math.min(10, preferences.getInt("depth", 4)));
-        depthModel = Math.max(0, Math.min(7, preferences.getInt("depth_model", 1)));
+        stereoView = Math.max(0, Math.min(2, preferences.getInt("stereo_view", 0)));
+        depthModel = Math.max(0, Math.min(9, preferences.getInt("depth_model", 1)));
         screenSize = Math.max(0, Math.min(2, preferences.getInt("screen_size", 1)));
         autoNext = preferences.getBoolean("auto_next", true);
         roomSound = preferences.getBoolean("room_sound", false);
@@ -130,7 +131,7 @@ final class CinemaPanel {
         }
         return page | (fast ? 8 : 0) | (comparison ? 16 : 0) | (stereo << 5)
                 | (reverse ? 256 : 0) | (depth << 9) | (screenSize << 13) | (roomSound ? 1 << 15 : 0)
-                | (depthModel << 24) | (antialias ? 1 << 18 : 0) | (deband ? 1 << 19 : 0)
+                | (depthModel << 24) | (stereoView << 28) | (antialias ? 1 << 18 : 0) | (deband ? 1 << 19 : 0)
                 | (darkRoom ? 1 << 20 : 0) | (prefer90 ? 1 << 21 : 0) | (smoothLaser ? 1 << 22 : 0) | (dehalo ? 1 << 23 : 0);
     }
 
@@ -151,7 +152,7 @@ final class CinemaPanel {
                 .putBoolean("reverse_eyes", reverse).putBoolean("auto_next", autoNext)
                 .putBoolean("antialias", antialias).putBoolean("deband", deband).putBoolean("dehalo", dehalo).putBoolean("dark_room", darkRoom)
                 .putBoolean("prefer_90_hz", prefer90).putBoolean("smooth_laser", smoothLaser)
-                .putInt("depth", depth).putInt("depth_model", depthModel).putInt("screen_size", screenSize).apply();
+                .putInt("stereo_view", stereoView).putInt("depth", depth).putInt("depth_model", depthModel).putInt("screen_size", screenSize).apply();
         dirty = true;
     }
 
@@ -606,7 +607,8 @@ final class CinemaPanel {
                 + " | " + GLES20.glGetString(GLES20.GL_VERSION)
                 + String.format(Locale.ROOT, " | FPS %.1f | Display %.1f Hz | Anime4K GPU %.2f ms"
                         + " | Eye MSAA %b | Stereo %d | Video %s",
-                        fps, displayHz, gpuMs, eyeMsaa, stereo, frameSize()), frameWidth > 0));
+                        fps, displayHz, gpuMs, eyeMsaa, stereo, frameSize())
+                + " | Warp " + stereoView + " | Depth model " + DepthModels.label(depthModel), frameWidth > 0));
         button(dehalo ? "Dehalo: вкл." : "Dehalo: выкл.", 918, 246, 330, 52, dehalo, () -> {
             dehalo = !dehalo;
             settingsChanged();
@@ -633,7 +635,17 @@ final class CinemaPanel {
                 settingsChanged();
             });
             button(DepthModels.label(depthModel) + "  ›", 716, 385, depthModel == 2 ? 181 : 532, 58, true, () -> {
-                depthModel = (depthModel + 1) % 8;
+                depthModel = (depthModel + 1) % 10;
+                settingsChanged();
+            });
+            String warp = switch (stereoView) {
+                case 1 -> "Стерео: защита контуров";
+                case 2 -> "Показать карту глубины";
+                default -> "Стерео: обычное";
+            };
+            button(warp + "  ›", 716, 451, 532, 49, stereoView != 0, () -> {
+                stereoView = (stereoView + 1) % 3;
+                android.util.Log.i("AniartDepth", "Stereo view " + stereoView + " | " + DepthModels.label(depthModel));
                 settingsChanged();
             });
             if (depthModel == 2) {
