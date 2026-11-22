@@ -1,6 +1,7 @@
 package dev.aniart.vr;
 
 import android.content.Context;
+import android.system.Os;
 import android.util.Log;
 import ai.onnxruntime.OnnxTensor;
 import ai.onnxruntime.OrtEnvironment;
@@ -121,7 +122,8 @@ final class DepthModels {
                     limbo = "нет файла";
                     Log.i("AniartDepth", "Limbo V3 CPU skipped: weights not installed");
                 }
-                report.accept("Проверок пройдено " + passed + "/3 · Limbo: " + limbo);
+                String htp = checkHtp() ? "OK" : "см. лог";
+                report.accept("Глубина " + passed + "/3 · Limbo: " + limbo + " · QNN HTP: " + htp);
             } catch (Exception | LinkageError error) {
                 Log.w("AniartDepth", "Diagnostics failed", error);
                 report.accept("Ошибка диагностики. См. AniartDepth");
@@ -132,6 +134,53 @@ final class DepthModels {
                 checking.set(false);
             }
         });
+    }
+
+    private boolean checkHtp() {
+        String stage = "prepare";
+        try (var options = new OrtSession.SessionOptions()) {
+            String nativeDir = context.getApplicationInfo().nativeLibraryDir;
+            String searchPath = Os.getenv("ADSP_LIBRARY_PATH");
+            if (searchPath == null || searchPath.isEmpty()) {
+                searchPath = "/vendor/lib/rfsa/adsp;/vendor/dsp;/system/lib/rfsa/adsp";
+            }
+            // Prefix the installed library directory once across repeated button presses.
+            if (!searchPath.startsWith(nativeDir + ";")) {
+                Os.setenv("ADSP_LIBRARY_PATH", nativeDir + ";" + searchPath, true);
+            }
+            Log.i("AniartDepth", "QNN HTP probe begin | CPU fallback disabled");
+            stage = "register QNN EP";
+            options.addConfigEntry("session.disable_cpu_ep_fallback", "1");
+            options.addQnn(Map.of("backend_path", new File(nativeDir, "libQnnHtp.so").getAbsolutePath(),
+                    "offload_graph_io_quantization", "0"));
+            stage = "create HTP session";
+            long start = System.nanoTime();
+            var ort = OrtEnvironment.getEnvironment();
+            try (var session = ort.createSession(modelAsset("qnn-htp-probe.onnx"), options)) {
+                Log.i("AniartDepth", "QNN HTP session initialized in " + (System.nanoTime() - start) / 1_000_000 + " ms");
+                stage = "execute and verify HTP output";
+                ByteBuffer pixels = ByteBuffer.allocateDirect(16);
+                for (int i = 0; i < 16; i++) pixels.put(i, (byte) (120 + i));
+                try (var input = OnnxTensor.createTensor(ort, pixels, new long[] {1, 1, 4, 4},
+                        ai.onnxruntime.OnnxJavaType.UINT8)) {
+                    start = System.nanoTime();
+                    try (var output = session.run(Map.of("pixels", input))) {
+                        ByteBuffer values = tensor(output, "result").getByteBuffer();
+                        if (values.remaining() != 16) throw new IOException("Unexpected HTP output length");
+                        for (int i = 0; i < 16; i++) {
+                            int value = Byte.toUnsignedInt(values.get());
+                            if (value != 112 + 2 * i) throw new IOException("Unexpected HTP output at " + i + ": " + value);
+                        }
+                        Log.i("AniartDepth", "QNN HTP PASS | CPU fallback disabled | "
+                                + (System.nanoTime() - start) / 1_000_000 + " ms");
+                    }
+                }
+            }
+            return true;
+        } catch (Exception | LinkageError error) {
+            Log.w("AniartDepth", "QNN HTP FAIL at " + stage, error);
+            return false;
+        }
     }
 
     private int checkBackend(String name, Callable<Backend> open, byte[] frame, int passes) {

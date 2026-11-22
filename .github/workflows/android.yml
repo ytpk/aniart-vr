@@ -51,8 +51,12 @@ jobs:
           import sys
           from zipfile import ZIP_STORED, ZipFile
           with ZipFile(sys.argv[1]) as apk:
+              for lib in ("libQnnHtp.so", "libQnnHtpV73Skel.so", "libQnnHtpV73Stub.so"):
+                  apk.getinfo("lib/arm64-v8a/" + lib)
+              for doc in ("LICENSE.pdf", "NOTICE.txt"):
+                  apk.getinfo("assets/licenses/qnn/" + doc)
               for model in ("zipdepth-wide-320x180-t320x192-edgepad-gpu.tflite", "zipdepth-base-256-cpu.tflite",
-                            "encoder_fp16.onnx", "bootstrap_fp16.onnx", "stream_fp16.onnx"):
+                            "encoder_fp16.onnx", "bootstrap_fp16.onnx", "stream_fp16.onnx", "qnn-htp-probe.onnx"):
                   assert apk.getinfo("assets/depth/" + model).compress_type == ZIP_STORED, model
           PY
           unzip -p "$apk" assets/chaquopy/requirements-common.imy > "$RUNNER_TEMP/aniart-requirements.zip"

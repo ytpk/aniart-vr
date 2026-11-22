@@ -123,6 +123,8 @@ Media3 выводит декодированные кадры в `SurfaceTexture
 adb logcat -v threadtime -T 1 -s AniartDepth tflite LiteRT linker AndroidRuntime > aniart-depth-check.txt
 ```
 
+Эта же кнопка запускает тест **QNN HTP** с отключённым CPU fallback. Тест проверяет численный результат 8-битной свёртки и пишет `QNN HTP PASS` или `QNN HTP FAIL` с этапом ошибки. Он проверяет доступ к Hexagon и не меняет бэкенд моделей глубины. Используются ONNX Runtime QNN 1.24.3 и Qualcomm QNN Runtime 2.42.0. [QNN Execution Provider](https://onnxruntime.ai/docs/execution-providers/QNN-ExecutionProvider.html), [лицензия Qualcomm](overlay/src/main/assets/licenses/qnn/LICENSE.pdf), [уведомления](overlay/src/main/assets/licenses/qnn/NOTICE.txt).
+
 Веса ZipDepth и Video Depth Anything скачиваются при сборке и проверяются по SHA-256. Если на Quest нет файлового менеджера для импорта Limbo, в debug-сборке можно загрузить файл через ADB и снова выбрать Limbo V3:
 
 ```sh

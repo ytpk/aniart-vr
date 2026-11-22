@@ -16,8 +16,8 @@ android {
         applicationId 'dev.aniart.vr'
         minSdk 31
         targetSdk 34
-        versionCode 20
-        versionName '0.6.7'
+        versionCode 21
+        versionName '0.6.8'
         ndk { abiFilters 'arm64-v8a' }
         externalNativeBuild {
             cmake {
@@ -30,6 +30,13 @@ android {
     }
     sourceSets.main.manifest.srcFile 'AndroidManifest.xml'
     androidResources { noCompress += ['tflite', 'onnx'] }
+    packaging {
+        // FastRPC needs the DSP skeleton as an extracted file rather than an APK entry.
+        jniLibs {
+            useLegacyPackaging = true
+            keepDebugSymbols += ['**/libQnn*Skel.so', '**/libQnn*Stub.so']
+        }
+    }
     externalNativeBuild {
         cmake {
             path '../../../CMakeLists.txt'
@@ -51,7 +58,7 @@ chaquopy {
     }
 }
 dependencies {
-    implementation "com.microsoft.onnxruntime:onnxruntime-android:1.24.3"
+    implementation "com.microsoft.onnxruntime:onnxruntime-android-qnn:1.24.3"
     implementation 'com.google.ai.edge.litert:litert:1.4.2'
     implementation 'com.google.ai.edge.litert:litert-gpu:1.4.2'
     implementation 'androidx.media3:media3-exoplayer:1.4.1'
