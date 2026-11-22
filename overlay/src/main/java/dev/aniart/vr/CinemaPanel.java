@@ -56,6 +56,9 @@ final class CinemaPanel {
     private int stereo, depth, screenSize;
     private int depthModel;
     private String depthStatus = "";
+    private boolean antialias, deband, darkRoom, smoothLaser, prefer90;
+    private boolean eyeMsaa;
+    private float displayHz;
     private boolean fast, comparison, reverse, autoNext, roomSound;
     private int hovered = -1;
     private boolean dirty = true, allocated;
@@ -70,6 +73,11 @@ final class CinemaPanel {
         this.anicli = new AniCliBrowser(activity, this::playOnline);
         remote = preferences.getBoolean("anicli_tab", true);
         this.preferences = preferences;
+        antialias = preferences.getBoolean("antialias", true);
+        deband = preferences.getBoolean("deband", true);
+        darkRoom = preferences.getBoolean("dark_room", true);
+        smoothLaser = preferences.getBoolean("smooth_laser", true);
+        prefer90 = preferences.getBoolean("prefer_90_hz", true);
         fast = preferences.getBoolean("anime4k", false);
         comparison = preferences.getBoolean("comparison", false);
         reverse = preferences.getBoolean("reverse_eyes", false);
@@ -121,7 +129,8 @@ final class CinemaPanel {
         }
         return page | (fast ? 8 : 0) | (comparison ? 16 : 0) | (stereo << 5)
                 | (reverse ? 256 : 0) | (depth << 9) | (screenSize << 13) | (roomSound ? 1 << 15 : 0)
-                | (depthModel << 16);
+                | (depthModel << 16) | (antialias ? 1 << 18 : 0) | (deband ? 1 << 19 : 0)
+                | (darkRoom ? 1 << 20 : 0) | (prefer90 ? 1 << 21 : 0) | (smoothLaser ? 1 << 22 : 0);
     }
 
     private void changeStereo(int mode) {
@@ -139,6 +148,8 @@ final class CinemaPanel {
     private void settingsChanged() {
         preferences.edit().putBoolean("anime4k", fast).putBoolean("comparison", comparison)
                 .putBoolean("reverse_eyes", reverse).putBoolean("auto_next", autoNext)
+                .putBoolean("antialias", antialias).putBoolean("deband", deband).putBoolean("dark_room", darkRoom)
+                .putBoolean("prefer_90_hz", prefer90).putBoolean("smooth_laser", smoothLaser)
                 .putInt("depth", depth).putInt("depth_model", depthModel).putInt("screen_size", screenSize).apply();
         dirty = true;
     }
@@ -221,9 +232,9 @@ final class CinemaPanel {
         return -1;
     }
 
-    void upload(float x, float y, int filterStatus, int width, int height,
-                boolean depthReady, float fps, float gpuMs) {
-        if (page == HIDDEN) return;
+    boolean upload(float x, float y, int filterStatus, int width, int height,
+                boolean depthReady, float fps, float gpuMs, float displayHz, boolean eyeMsaa) {
+        if (page == HIDDEN) return false;
         var catalog = activity.catalog();
         var state = activity.snapshot();
         String notice = activity.notice();
@@ -247,7 +258,7 @@ final class CinemaPanel {
                 || frameHeight != height || this.depthReady != depthReady) dirty = true;
         if (page == WATCH && (!state.equals(lastSnapshot) || now - lastRender >= 2000)) dirty = true;
         if (page == SETTINGS && now - lastRender >= 700) dirty = true;
-        if (!dirty) return;
+        if (!dirty) return false;
 
         lastNotice = notice;
         lastSnapshot = state;
@@ -258,6 +269,8 @@ final class CinemaPanel {
         this.depthReady = depthReady;
         this.gpuMs = gpuMs;
         this.fps = fps;
+        this.displayHz = displayHz;
+        this.eyeMsaa = eyeMsaa;
         int h = page == WATCH ? WATCH_HEIGHT : FULL_HEIGHT;
         if (bitmap == null || bitmap.getHeight() != h) {
             if (bitmap != null) bitmap.recycle();
@@ -280,6 +293,7 @@ final class CinemaPanel {
         else GLUtils.texImage2D(GLES20.GL_TEXTURE_2D, 0, bitmap, 0);
         allocated = true;
         dirty = false;
+        return true;
     }
 
     private void header(CinemaActivity.Snapshot state) {
@@ -577,7 +591,14 @@ final class CinemaPanel {
             settingsChanged();
         });
         button(comparison ? "A/B: вкл." : "A/B: выкл.", 320, 173, 250, 62, comparison, this::toggleComparison);
-        text(frameSize() + "  ·  " + filterLabel(), 590, 213, 24, MUTED, 656, false);
+        button(antialias ? "Сглаживание: вкл." : "Сглаживание: выкл.", 584, 173, 320, 62, antialias, () -> {
+            antialias = !antialias;
+            settingsChanged();
+        });
+        button(deband ? "Градиенты: вкл." : "Градиенты: выкл.", 918, 173, 330, 62, deband, () -> {
+            deband = !deband;
+            settingsChanged();
+        });
         text("Стерео", 32, 291, 36, INK, 600, true);
         String[] options = {"2D", "SBS · рядом", "OU · сверху/снизу", "2D → 3D"};
         for (int i = 0; i < options.length; i++) {
@@ -625,6 +646,18 @@ final class CinemaPanel {
             roomSound = !roomSound;
             activity.setRoomSound(roomSound);
         });
+        button(darkRoom ? "Свет от экрана" : "Обычный зал", 315, 599, 290, 55, darkRoom, () -> {
+            darkRoom = !darkRoom;
+            settingsChanged();
+        });
+        button(smoothLaser ? "Лазер: плавный" : "Лазер: прямой", 619, 599, 285, 55, smoothLaser, () -> {
+            smoothLaser = !smoothLaser;
+            settingsChanged();
+        });
+        button(prefer90 ? "Цель: 90 Гц" : "Цель: 72 Гц", 918, 599, 330, 55, prefer90, () -> {
+            prefer90 = !prefer90;
+            settingsChanged();
+        });
         String audio = notice;
         if (audio.isEmpty() && roomSound) {
             audio = switch (activity.roomInputChannels()) {
@@ -636,9 +669,11 @@ final class CinemaPanel {
                 default -> "Звук зала недоступен для формата дорожки";
             };
         }
-        if (!audio.isEmpty()) text(audio, 320, 636, 22, MUTED, 905, false);
+        if (!audio.isEmpty()) text(audio, 32, 672, 19, MUTED, 940, false);
         String stats = String.format(Locale.ROOT, "%.0f FPS", fps);
-        if (filterStatus == 1 && gpuMs >= 0) stats += String.format(Locale.ROOT, "  ·  GPU %.1f мс", gpuMs);
+        if (displayHz > 0) stats += String.format(Locale.ROOT, " / %.0f Гц", displayHz);
+        if (eyeMsaa) stats += "  ·  MSAA ×2";
+        if (filterStatus == 1 && gpuMs >= 0) stats += String.format(Locale.ROOT, "  ·  Anime4K %.1f мс", gpuMs);
         stats += "  ·  " + stereoStatus();
         text(stats, 32, 704, 23, ACCENT, 940, false);
         if (activity.snapshot().episode() != null) button("К просмотру", 1012, 655, 236, 66, true, () -> show(WATCH));

@@ -1,0 +1,124 @@
+--- a/src/tests/hello_xr/openxr_program.cpp
++++ b/src/tests/hello_xr/openxr_program.cpp
+@@ -190,6 +190,22 @@
+         std::transform(graphicsExtensions.begin(), graphicsExtensions.end(), std::back_inserter(extensions),
+                        [](const std::string& ext) { return ext.c_str(); });
+
++#ifdef XR_USE_PLATFORM_ANDROID
++        uint32_t count = 0;
++        if (XR_SUCCEEDED(xrEnumerateInstanceExtensionProperties(nullptr, 0, &count, nullptr)) && count) {
++            std::vector<XrExtensionProperties> properties(count, {XR_TYPE_EXTENSION_PROPERTIES});
++            if (XR_SUCCEEDED(xrEnumerateInstanceExtensionProperties(nullptr, count, &count, properties.data()))) {
++                for (const auto& property : properties) {
++                    if (strcmp(property.extensionName, XR_FB_DISPLAY_REFRESH_RATE_EXTENSION_NAME) == 0) {
++                        extensions.push_back(XR_FB_DISPLAY_REFRESH_RATE_EXTENSION_NAME);
++                        m_cinemaRefreshEnabled = true;
++                        break;
++                    }
++                }
++            }
++        }
++#endif
++
+         XrInstanceCreateInfo createInfo{XR_TYPE_INSTANCE_CREATE_INFO};
+         createInfo.next = m_platformPlugin->GetInstanceCreateExtension();
+         createInfo.enabledExtensionCount = (uint32_t)extensions.size();
+@@ -201,6 +217,17 @@
+         createInfo.applicationInfo.apiVersion = XR_API_VERSION_1_0;
+
+         CHECK_XRCMD(xrCreateInstance(&createInfo, &m_instance));
++#ifdef XR_USE_PLATFORM_ANDROID
++        if (m_cinemaRefreshEnabled) {
++            m_cinemaRefreshEnabled =
++                XR_SUCCEEDED(xrGetInstanceProcAddr(m_instance, "xrEnumerateDisplayRefreshRatesFB",
++                    reinterpret_cast<PFN_xrVoidFunction*>(&m_cinemaEnumerateHz))) &&
++                XR_SUCCEEDED(xrGetInstanceProcAddr(m_instance, "xrRequestDisplayRefreshRateFB",
++                    reinterpret_cast<PFN_xrVoidFunction*>(&m_cinemaRequestHz))) &&
++                XR_SUCCEEDED(xrGetInstanceProcAddr(m_instance, "xrGetDisplayRefreshRateFB",
++                    reinterpret_cast<PFN_xrVoidFunction*>(&m_cinemaGetHz)));
++        }
++#endif
+     }
+
+     void CreateInstance() override {
+@@ -786,6 +813,10 @@
+                 XrSessionBeginInfo sessionBeginInfo{XR_TYPE_SESSION_BEGIN_INFO};
+                 sessionBeginInfo.primaryViewConfigurationType = m_options->Parsed.ViewConfigType;
+                 CHECK_XRCMD(xrBeginSession(m_session, &sessionBeginInfo));
++#ifdef XR_USE_PLATFORM_ANDROID
++                m_cinemaLastRequest = 0;
++                Cinema::displayHz = 0;
++#endif
+                 m_sessionRunning = true;
+                 break;
+             }
+@@ -937,12 +968,47 @@
+ #endif
+     }
+
++#ifdef XR_USE_PLATFORM_ANDROID
++    bool m_cinemaRefreshEnabled = false;
++    float m_cinemaLastRequest = 0;
++    PFN_xrEnumerateDisplayRefreshRatesFB m_cinemaEnumerateHz = nullptr;
++    PFN_xrRequestDisplayRefreshRateFB m_cinemaRequestHz = nullptr;
++    PFN_xrGetDisplayRefreshRateFB m_cinemaGetHz = nullptr;
++
++    void UpdateCinemaRefresh() {
++        if (!m_cinemaRefreshEnabled) return;
++        const float requested = (Cinema::config & (1 << 21)) ? 90.f : 72.f;
++        if (m_sessionState == XR_SESSION_STATE_FOCUSED && requested != m_cinemaLastRequest) {
++            m_cinemaLastRequest = requested;
++            uint32_t count = 0;
++            if (XR_SUCCEEDED(m_cinemaEnumerateHz(m_session, 0, &count, nullptr)) && count) {
++                std::vector<float> rates(count);
++                if (XR_SUCCEEDED(m_cinemaEnumerateHz(m_session, count, &count, rates.data()))) {
++                    for (float rate : rates) {
++                        if (std::abs(rate - requested) >= .5f) continue;
++                        const XrResult result = m_cinemaRequestHz(m_session, rate);
++                        Log::Write(XR_SUCCEEDED(result) ? Log::Level::Info : Log::Level::Warning,
++                            Fmt("Aniart display request %.0f Hz: %d", rate, int(result)));
++                        break;
++                    }
++                }
++            }
++        }
++        if (!Cinema::displayHz || Cinema::renderFrame % 72 == 0) {
++            m_cinemaGetHz(m_session, &Cinema::displayHz);
++        }
++    }
++#endif
++
+     void RenderFrame() override {
+ #ifdef XR_USE_PLATFORM_ANDROID
+         ++Cinema::renderFrame;
+ #endif
+         CHECK(m_session != XR_NULL_HANDLE);
+
++#ifdef XR_USE_PLATFORM_ANDROID
++        UpdateCinemaRefresh();
++#endif
+         XrFrameWaitInfo frameWaitInfo{XR_TYPE_FRAME_WAIT_INFO};
+         XrFrameState frameState{XR_TYPE_FRAME_STATE};
+         CHECK_XRCMD(xrWaitFrame(m_session, &frameWaitInfo, &frameState));
+--- a/src/tests/hello_xr/graphicsplugin_opengles.cpp
++++ b/src/tests/hello_xr/graphicsplugin_opengles.cpp
+@@ -307,10 +307,15 @@
+         glEnable(GL_CULL_FACE);
+         glEnable(GL_DEPTH_TEST);
+
+-        const uint32_t depthTexture = GetDepthTexture(colorTexture);
+-
+-        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, colorTexture, 0);
+-        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, depthTexture, 0);
++#ifdef XR_USE_PLATFORM_ANDROID
++        if (!m_cinema.BindAntialias(colorTexture, layerView.subImage.imageRect.extent.width,
++                                    layerView.subImage.imageRect.extent.height))
++#endif
++        {
++            const uint32_t depthTexture = GetDepthTexture(colorTexture);
++            glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, colorTexture, 0);
++            glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, depthTexture, 0);
++        }
+
+         // Clear swapchain and depth buffer.
+         glClearColor(m_clearColor[0], m_clearColor[1], m_clearColor[2], m_clearColor[3]);

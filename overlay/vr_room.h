@@ -25,16 +25,40 @@ void main() {
 }
 )glsl";
     static constexpr const char* fragment = R"glsl(#version 300 es
-precision mediump float;
+precision highp float;
 in vec3 world;
 in vec3 color;
 flat in float surfaceType;
 out vec4 outColor;
+uniform int darkMode, hasLight;
+uniform sampler2D screenLight;
+uniform vec4 screenRect;
+vec3 spill(vec2 uv, vec3 normal) {
+    vec3 point = vec3(screenRect.xy + (uv-.5)*screenRect.zw, -5.10);
+    vec3 offset = world - point;
+    float distance2 = dot(offset,offset) + .4;
+    vec3 ray = offset * inversesqrt(distance2);
+    float weight = max(0.0,ray.z) * abs(dot(normal,ray)) / distance2;
+    vec3 rgb = texture(screenLight, uv).rgb;
+    return rgb*rgb * weight;
+}
 float grain(vec3 p) {
     vec3 cell = fract(floor(p) * vec3(.1031, .1137, .1379));
     return fract(dot(cell, cell.yzx + 19.19));
 }
 void main() {
+    if (darkMode != 0) {
+        vec3 shaded = color * (surfaceType > 2.5 ? .023 : .11);
+        if (hasLight != 0 && surfaceType < 2.5) {
+            vec3 n = cross(dFdx(world), dFdy(world));
+            n *= inversesqrt(max(dot(n,n), 1e-12));
+            vec3 reflected = spill(vec2(.25,.25),n) + spill(vec2(.75,.25),n)
+                           + spill(vec2(.25,.75),n) + spill(vec2(.75,.75),n);
+            shaded += .32 * sqrt(reflected) * (.8 + 2.0 * color);
+        }
+        outColor = vec4(shaded, 1);
+        return;
+    }
     if (surfaceType > 2.5) {
         outColor = vec4(color, 1);
         return;
@@ -154,9 +178,15 @@ public:
         count = static_cast<GLsizei>(mesh.vertices.size());
     }
 
-    void Draw(const XrMatrix4x4f& vp) {
+    void Draw(const XrMatrix4x4f& vp, bool dark, GLuint light, float x, float y, float w, float h) {
         glUseProgram(program);
         glUniformMatrix4fv(glGetUniformLocation(program, "vp"), 1, GL_FALSE, vp.m);
+        glUniform1i(glGetUniformLocation(program, "darkMode"), dark);
+        glUniform1i(glGetUniformLocation(program, "hasLight"), light != 0);
+        glUniform4f(glGetUniformLocation(program, "screenRect"), x, y, w, h);
+        glUniform1i(glGetUniformLocation(program, "screenLight"), 0);
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, light);
         glBindVertexArray(vao);
         glDrawArrays(GL_TRIANGLES, 0, count);
     }

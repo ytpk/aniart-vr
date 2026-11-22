@@ -256,9 +256,9 @@ public final class CinemaActivity extends NativeActivity {
     }
     public void command(int command) { panel.command(command); }
     public void clickPanel(float x, float y) { panel.click(x, y); }
-    public void uploadPanel(float x, float y, int filterStatus, int width, int height,
-                            boolean depthReady, float fps, float gpuMs) {
-        panel.upload(x, y, filterStatus, width, height, depthReady, fps, gpuMs);
+    public boolean uploadPanel(float x, float y, int filterStatus, int width, int height,
+                            boolean depthReady, float fps, float gpuMs, float displayHz, boolean eyeMsaa) {
+        return panel.upload(x, y, filterStatus, width, height, depthReady, fps, gpuMs, displayHz, eyeMsaa);
     }
 
     void open(Catalog.Episode episode) {

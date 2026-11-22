@@ -79,7 +79,8 @@ uniform sampler2D enhanced, depthMap;
 uniform mat4 transform;
 uniform vec4 crop;
 uniform vec2 inset;
-uniform int operation;
+uniform int operation, post;
+uniform vec2 sourceTexel;
 uniform float shift;
 in vec2 uv;
 out vec4 color;
@@ -90,7 +91,43 @@ vec3 source(vec2 p) {
 float light(vec3 rgb) {
     return dot(rgb, vec3(0.2126, 0.7152, 0.0722));
 }
+vec3 picture(vec2 p, bool sharpened) {
+    return sharpened ? texture(enhanced, p).rgb : source(p);
+}
+vec3 finishPicture(vec2 p, bool sharpened) {
+    vec2 stepSize = sourceTexel * (sharpened ? .5 : 1.0);
+    vec3 value = picture(p, sharpened);
+    if ((post & 1) != 0) {
+        vec2 footprint = min(fwidth(p), stepSize * 12.0);
+        if (any(greaterThan(footprint, stepSize * 1.4))) {
+            vec2 offset = footprint * .28;
+            value = .25 * (picture(p + offset, sharpened) + picture(p - offset, sharpened)
+                + picture(p + vec2(offset.x,-offset.y), sharpened)
+                + picture(p + vec2(-offset.x,offset.y), sharpened));
+        }
+    }
+    if ((post & 2) != 0) {
+        vec2 radius = clamp(fwidth(p), stepSize * 2.5, stepSize * 7.0);
+        vec3 a = picture(p + radius, sharpened), b = picture(p - radius, sharpened);
+        vec3 c = picture(p + vec2(radius.x,-radius.y), sharpened);
+        vec3 d = picture(p + vec2(-radius.x,radius.y), sharpened);
+        vec3 delta = max(max(abs(a-value), abs(b-value)), max(abs(c-value), abs(d-value)));
+        float edge = max(delta.r, max(delta.g, delta.b));
+        value = mix(value, (a+b+c+d)*.25, .68 * (1.0-smoothstep(.018,.085,edge)));
+        vec2 pixel = floor(clamp(p,0.0,1.0) / sourceTexel);
+        float noise = fract(52.9829189 * fract(dot(pixel, vec2(.06711056,.00583715)))) - .5;
+        value += noise / 255.0;
+    }
+    return value;
+}
 void main() {
+    if (operation == 4) {
+        vec3 sum = vec3(0.0);
+        for (int y=0;y<4;++y) for (int x=0;x<4;++x)
+            sum += source(uv + (vec2(x,y)-1.5)*vec2(1.0/32.0,1.0/16.0));
+        color = vec4(sum/16.0, 1);
+        return;
+    }
     if (operation == 3) {
         vec2 radius = vec2(.015, .024);
         float value = light(source(uv)) * .4;
@@ -108,10 +145,9 @@ void main() {
     }
     if (operation == 2 && abs(uv.x - .5) < .0016) {
         color = vec4(.87, .81, 1, 1);
-    } else if (operation == 1 || (operation == 2 && uv.x > .5)) {
-        color = vec4(texture(enhanced, p).rgb, 1);
     } else {
-        color = vec4(source(p), 1);
+        bool sharpened = operation == 1 || (operation == 2 && uv.x > .5);
+        color = vec4(finishPicture(p, sharpened), 1);
     }
 }
 )glsl";
@@ -129,7 +165,14 @@ void main() {
     GLuint oes = 0, panel = 0, vao = 0, fbo = 0, video = 0, flat = 0, beam = 0;
     GLuint textures[7]{}, passes[5]{}, depth = 0;
     static constexpr int depthCaptureW = 256, depthCaptureH = 144;
-    GLuint depthCapture = 0;
+    GLuint depthCapture = 0, screenLight = 0, msaaDepth = 0;
+    int msaaWidth = 0, msaaHeight = 0;
+    PFNGLFRAMEBUFFERTEXTURE2DMULTISAMPLEEXTPROC bindMultisample = nullptr;
+    PFNGLRENDERBUFFERSTORAGEMULTISAMPLEEXTPROC storageMultisample = nullptr;
+    bool canMsaa = false, lightReady = false, panelMipsDirty = true;
+    std::chrono::steady_clock::time_point lastLight{}, lastAim{};
+    Pointer previousAim;
+    int aimPage = -1, aimHand = -1;
     int depthModel = -1;
     jmethodID selectDepth = nullptr, wantsDepth = nullptr, submitDepth = nullptr, takeDepth = nullptr;
     jbyteArray depthInput = nullptr;
@@ -206,7 +249,7 @@ void main() {
         glUniformMatrix4fv(glGetUniformLocation(program, name), 1, GL_FALSE, matrix);
     }
 
-    void UseVideo(const XrMatrix4x4f& mvp, int layout, int view, int operation, float shift) {
+    void UseVideo(const XrMatrix4x4f& mvp, int layout, int view, int operation, float shift, int post = 0) {
         glUseProgram(video);
         Matrix(video, "mvp", mvp.m);
         Matrix(video, "transform", transform);
@@ -215,6 +258,9 @@ void main() {
                     layout == 1 ? .5f * view : 0, layout == 2 ? .5f * (1 - view) : 0);
         glUniform2f(glGetUniformLocation(video, "inset"), .5f / sourceW, .5f / sourceH);
         glUniform1i(glGetUniformLocation(video, "operation"), operation);
+        glUniform1i(glGetUniformLocation(video, "post"), post);
+        glUniform2f(glGetUniformLocation(video, "sourceTexel"),
+                    (layout == 1 ? 2.f : 1.f) / sourceW, (layout == 2 ? 2.f : 1.f) / sourceH);
         glUniform1f(glGetUniformLocation(video, "shift"), shift);
         glActiveTexture(GL_TEXTURE2);
         glBindTexture(GL_TEXTURE_2D, shift != 0 ? depth : 0);
@@ -224,13 +270,24 @@ void main() {
         glBindTexture(GL_TEXTURE_EXTERNAL_OES, oes);
     }
 
-    void Process(bool enhance, bool mapDepth, bool captureDepth) {
+    void Process(bool enhance, bool mapDepth, bool captureDepth, bool updateLight) {
         XrMatrix4x4f identity;
         XrMatrix4x4f_CreateIdentity(&identity);
         glBindFramebuffer(GL_FRAMEBUFFER, fbo);
         glDisable(GL_DEPTH_TEST);
         glDisable(GL_CULL_FACE);
         glBindVertexArray(vao);
+        if (updateLight && Target(screenLight, 8, 4)) {
+            UseVideo(identity, Layout(), 0, 4, 0);
+            if (lightReady) {
+                glEnable(GL_BLEND);
+                glBlendColor(0, 0, 0, .24f);
+                glBlendFunc(GL_CONSTANT_ALPHA, GL_ONE_MINUS_CONSTANT_ALPHA);
+            }
+            glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+            glDisable(GL_BLEND);
+            lightReady = true;
+        }
         if (mapDepth) {
             depthReady = Target(depth, 192, 108);
             if (depthReady) {
@@ -309,9 +366,10 @@ void main() {
         return {a.y*b.z-a.z*b.y, a.z*b.x-a.x*b.z, a.x*b.y-a.y*b.x};
     }
 
-    void UpdatePointer(int page) {
+    void UpdatePointer(int page, std::chrono::steady_clock::time_point now) {
         pointer = {};
         if (!page) {
+            previousAim = {};
             if ((controllers[0].tracked && controllers[0].pressed) ||
                 (controllers[1].tracked && controllers[1].pressed)) {
                 Command(3);
@@ -327,10 +385,24 @@ void main() {
             (!rays[activeHand].hit && rays[other].hit)) activeHand = other;
         else if (!rays[activeHand].visible && rays[other].visible) activeHand = other;
         pointer = rays[activeHand];
+        if ((config & (1 << 22)) && pointer.hit && previousAim.hit && aimPage == page && aimHand == activeHand) {
+            const float dt = std::clamp(std::chrono::duration<float>(now - lastAim).count(), .001f, .10f);
+            const float distance = std::hypot(pointer.u - previousAim.u, pointer.v - previousAim.v);
+            const float response = 9.f + std::min(80.f, distance / dt * 32.f);
+            const float factor = 1.f - std::exp(-dt * response);
+            pointer.u = previousAim.u + (pointer.u - previousAim.u) * factor;
+            pointer.v = previousAim.v + (pointer.v - previousAim.v) * factor;
+            pointer.end = {geometry.center.x + (pointer.u - .5f) * geometry.w,
+                           geometry.center.y + (.5f - pointer.v) * geometry.h, geometry.center.z + .004f};
+        }
+        previousAim = pointer;
+        lastAim = now;
+        aimPage = page;
+        aimHand = activeHand;
         if (pointer.hit && controllers[activeHand].pressed) {
             env->CallVoidMethod(activity, click, pointer.u, pointer.v);
             const int next = env->CallIntMethod(activity, readConfig);
-            if ((next & 7) != page) pointer = {};
+            if ((next & 7) != page) previousAim = pointer = {};
             config = next;
         }
     }
@@ -366,7 +438,7 @@ public:
         jmethodID open = env->GetMethodID(cls, "openTexture", "(I)V");
         close = env->GetMethodID(cls, "closeTexture", "()V");
         latch = env->GetMethodID(cls, "latch", "([F)J");
-        upload = env->GetMethodID(cls, "uploadPanel", "(FFIIIZFF)V");
+        upload = env->GetMethodID(cls, "uploadPanel", "(FFIIIZFFFZ)Z");
         readConfig = env->GetMethodID(cls, "renderConfig", "()I");
         click = env->GetMethodID(cls, "clickPanel", "(FF)V");
         headYaw = env->GetMethodID(cls, "setHeadYaw", "(F)V");
@@ -390,12 +462,15 @@ public:
         glGenTextures(7, textures);
         glGenTextures(1, &depth);
         glGenTextures(1, &depthCapture);
+        glGenTextures(1, &screenLight);
         Texture(GL_TEXTURE_EXTERNAL_OES, oes, GL_LINEAR);
         Texture(GL_TEXTURE_2D, panel, GL_LINEAR);
         Texture(GL_TEXTURE_2D, depth, GL_LINEAR);
         glTexImage2D(GL_TEXTURE_2D, 0, GL_R8, 192, 108, 0, GL_RED, GL_UNSIGNED_BYTE, nullptr);
         Texture(GL_TEXTURE_2D, depthCapture, GL_LINEAR);
         glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, depthCaptureW, depthCaptureH, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+        Texture(GL_TEXTURE_2D, screenLight, GL_LINEAR);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 8, 4, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
         video = Program(vertex, externalImage);
         glUseProgram(video);
         glUniform1i(glGetUniformLocation(video, "enhanced"), 1);
@@ -412,6 +487,14 @@ public:
         glGetIntegerv(GL_NUM_EXTENSIONS, &extensions);
         for (GLint i = 0; i < extensions; ++i) {
             auto extension = reinterpret_cast<const char*>(glGetStringi(GL_EXTENSIONS, i));
+            if (std::string(extension) == "GL_EXT_multisampled_render_to_texture" ||
+                std::string(extension) == "GL_EXT_multisampled_render_to_texture2") {
+                bindMultisample = reinterpret_cast<PFNGLFRAMEBUFFERTEXTURE2DMULTISAMPLEEXTPROC>(
+                        eglGetProcAddress("glFramebufferTexture2DMultisampleEXT"));
+                storageMultisample = reinterpret_cast<PFNGLRENDERBUFFERSTORAGEMULTISAMPLEEXTPROC>(
+                        eglGetProcAddress("glRenderbufferStorageMultisampleEXT"));
+                canMsaa = bindMultisample && storageMultisample;
+            }
             if (std::string(extension) != "GL_EXT_disjoint_timer_query") continue;
             genQuery = reinterpret_cast<PFNGLGENQUERIESEXTPROC>(eglGetProcAddress("glGenQueriesEXT"));
             deleteQuery = reinterpret_cast<PFNGLDELETEQUERIESEXTPROC>(eglGetProcAddress("glDeleteQueriesEXT"));
@@ -420,7 +503,6 @@ public:
             queryStatus = reinterpret_cast<PFNGLGETQUERYOBJECTUIVEXTPROC>(eglGetProcAddress("glGetQueryObjectuivEXT"));
             queryTime = reinterpret_cast<PFNGLGETQUERYOBJECTUI64VEXTPROC>(eglGetProcAddress("glGetQueryObjectui64vEXT"));
             if (genQuery && deleteQuery && beginQuery && endQuery && queryStatus && queryTime) genQuery(1, &query);
-            break;
         }
         env->CallVoidMethod(activity, open, oes);
         opened = !env->ExceptionCheck();
@@ -431,12 +513,39 @@ public:
         }
     }
 
+    bool BindAntialias(GLuint color, int w, int h) {
+        eyeMsaa = false;
+        if (!(config & (1 << 18)) || !canMsaa) return false;
+        if (!msaaDepth) glGenRenderbuffers(1, &msaaDepth);
+        glBindRenderbuffer(GL_RENDERBUFFER, msaaDepth);
+        if (w != msaaWidth || h != msaaHeight) {
+            storageMultisample(GL_RENDERBUFFER, 2, GL_DEPTH_COMPONENT24, w, h);
+            msaaWidth = w;
+            msaaHeight = h;
+        }
+        bindMultisample(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, color, 0, 2);
+        glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, msaaDepth);
+        eyeMsaa = glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE;
+        if (!eyeMsaa) {
+            canMsaa = false;
+            Log::Write(Log::Level::Warning, "2x MSAA unavailable for this swapchain");
+        }
+        return eyeMsaa;
+    }
+
     void UpdatePanel() {
         glActiveTexture(GL_TEXTURE0);
         glBindTexture(GL_TEXTURE_2D, panel);
-        env->CallVoidMethod(activity, upload, pointer.hit ? pointer.u : -1.0f, pointer.hit ? pointer.v : -1.0f,
+        const bool mipmaps = (config & (1 << 18)) != 0;
+        const bool changed = env->CallBooleanMethod(activity, upload, pointer.hit ? pointer.u : -1.0f, pointer.hit ? pointer.v : -1.0f,
                             jint(filterStatus), jint(sourceW), jint(sourceH), jboolean(depthReady), fps,
-                            filtered ? gpuMs : -1.0f);
+                            filtered ? gpuMs : -1.0f, displayHz, jboolean(eyeMsaa));
+        panelMipsDirty = panelMipsDirty || changed;
+        if (mipmaps && panelMipsDirty) {
+            glGenerateMipmap(GL_TEXTURE_2D);
+            panelMipsDirty = false;
+        }
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, mipmaps ? GL_LINEAR_MIPMAP_LINEAR : GL_LINEAR);
     }
 
     void PrepareFrame() {
@@ -461,7 +570,7 @@ public:
             }
         }
         config = env->CallIntMethod(activity, readConfig);
-        UpdatePointer(config & 7);
+        UpdatePointer(config & 7, now);
         const jlong format = env->CallLongMethod(activity, latch, transformArray);
         if (env->ExceptionCheck()) {
             env->ExceptionDescribe();
@@ -471,7 +580,7 @@ public:
         bool newFrame = format > 0;
         if (format < 0) {
             width = height = sourceW = sourceH = 0;
-            filtered = depthReady = false;
+            filtered = depthReady = lightReady = false;
         } else if (newFrame) {
             sourceW = int((uint64_t(format) >> 48) & 0x7fff);
             sourceH = int((uint64_t(format) >> 32) & 0xffff);
@@ -520,7 +629,12 @@ public:
         if (!parallax) depthReady = false;
         const bool measure = enhance && query && !queryPending;
         if (measure) beginQuery(GL_TIME_ELAPSED_EXT, query);
-        if (enhance || mapDepth || captureDepth) Process(enhance, mapDepth, captureDepth);
+        const bool dark = (config & (1 << 20)) != 0;
+        if (!dark) lightReady = false;
+        const bool updateLight = dark && hasFrame && (!lightReady ||
+                (newFrame && now - lastLight >= std::chrono::milliseconds(67)));
+        if (updateLight) lastLight = now;
+        if (enhance || mapDepth || captureDepth || updateLight) Process(enhance, mapDepth, captureDepth, updateLight);
         if (measure) {
             endQuery(GL_TIME_ELAPSED_EXT);
             queryPending = true;
@@ -541,7 +655,6 @@ public:
             if (x*x + z*z > .01f) env->CallVoidMethod(activity, headYaw, std::atan2(x, -z));
         }
         glDisable(GL_CULL_FACE);
-        room.Draw(vp);
         glBindVertexArray(vao);
         float aspect = width && height ? float(width) / height : 16.0f / 9.0f;
         const int layout = Layout();
@@ -556,13 +669,15 @@ public:
         const float screenLimit = 3.67f - actualWidth * .5f;
         const float x = std::clamp(screenX, -screenLimit, screenLimit);
         const float y = std::clamp(.38f + screenY, -1.23f + h*.5f, 2.37f - h*.5f);
+        room.Draw(vp, (config & (1 << 20)) != 0, lightReady ? screenLight : 0, x, y, actualWidth, h);
+        glBindVertexArray(vao);
         Quad(vp, {x, y, -5.12f}, actualWidth + .19f, h + .19f, front, 0, .013f, .010f, .020f);
         const XrVector3f screen{x, y, -5.10f};
         if (width && sourceW && sourceH) {
             const int view = (eye != 0) ^ ((config & 256) != 0);
             const int operation = filtered && filteredLayout == layout ? ((config & 16) ? 2 : 1) : 0;
             const float shift = depthReady ? (view ? 1 : -1) * ((config >> 9) & 15) * .003f : 0;
-            UseVideo(QuadMatrix(vp, screen, actualWidth, h, front), layout, layout ? view : 0, operation, shift);
+            UseVideo(QuadMatrix(vp, screen, actualWidth, h, front), layout, layout ? view : 0, operation, shift, (config >> 18) & 3);
             glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
         } else {
             Quad(vp, screen, actualWidth, h, front, 0);
@@ -590,6 +705,8 @@ public:
         glDeleteTextures(7, textures);
         glDeleteTextures(1, &depth);
         glDeleteTextures(1, &depthCapture);
+        glDeleteTextures(1, &screenLight);
+        if (msaaDepth) glDeleteRenderbuffers(1, &msaaDepth);
         glDeleteFramebuffers(1, &fbo);
         glDeleteVertexArrays(1, &vao);
     }
