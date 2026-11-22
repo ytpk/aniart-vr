@@ -84,7 +84,7 @@ final class CinemaPanel {
         reverse = preferences.getBoolean("reverse_eyes", false);
         depth = Math.max(0, Math.min(10, preferences.getInt("depth", 4)));
         stereoView = Math.max(0, Math.min(2, preferences.getInt("stereo_view", 0)));
-        depthModel = Math.max(0, Math.min(9, preferences.getInt("depth_model", 1)));
+        depthModel = Math.max(0, Math.min(10, preferences.getInt("depth_model", 1)));
         screenSize = Math.max(0, Math.min(2, preferences.getInt("screen_size", 1)));
         autoNext = preferences.getBoolean("auto_next", true);
         roomSound = preferences.getBoolean("room_sound", false);
@@ -635,7 +635,7 @@ final class CinemaPanel {
                 settingsChanged();
             });
             button(DepthModels.label(depthModel) + "  ›", 716, 385, depthModel == 2 ? 181 : 532, 58, true, () -> {
-                depthModel = (depthModel + 1) % 10;
+                depthModel = (depthModel + 1) % 11;
                 settingsChanged();
             });
             String warp = switch (stereoView) {

@@ -3,6 +3,10 @@ package dev.aniart.vr;
 import android.content.Context;
 import android.system.Os;
 import android.util.Log;
+import com.google.ai.edge.litert.Accelerator;
+import com.google.ai.edge.litert.CompiledModel;
+import com.google.ai.edge.litert.Environment;
+import com.google.ai.edge.litert.TensorBuffer;
 import ai.onnxruntime.OnnxTensor;
 import ai.onnxruntime.OrtEnvironment;
 import ai.onnxruntime.OrtProvider;
@@ -14,7 +18,6 @@ import java.io.InputStream;
 import java.net.HttpURLConnection;
 import java.net.URI;
 import java.nio.ByteBuffer;
-import java.nio.ByteOrder;
 import java.nio.FloatBuffer;
 import java.nio.file.Files;
 import java.security.MessageDigest;
@@ -30,8 +33,6 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
 import java.util.function.IntConsumer;
-import org.tensorflow.lite.Interpreter;
-import org.tensorflow.lite.gpu.GpuDelegate;
 
 final class DepthModels {
     static final String LIMBO_FILE = "LimboV3_504x280_fp32.onnx";
@@ -39,6 +40,7 @@ final class DepthModels {
     private static final String LIMBO_URL =
             "https://github.com/NevermindNilas/TAS-Models-Host/releases/download/main/" + LIMBO_FILE;
     static final int CAPTURE_W = 256, CAPTURE_H = 144, MAP_W = 192, MAP_H = 108;
+    private static final String LIMBO_LITERT = "limbo-v3-litert.tflite";
     private static final String LIMBO_INT8 = "limbo-v3-cpu-dynamic-int8.onnx";
     private static final String ZIP_GPU = "zipdepth-wide-320x180-t320x192-edgepad-gpu.tflite";
     private static final String ZIP_CPU = "zipdepth-base-256-cpu.tflite";
@@ -78,6 +80,7 @@ final class DepthModels {
             case 7 -> "Limbo V3 CPU INT8";
             case 8 -> "Limbo V3 GPU · WebGPU";
             case 9 -> "Video Depth Anything GPU";
+            case 10 -> "Limbo V3 GPU · LiteRT";
             default -> "По яркости";
         };
     }
@@ -152,11 +155,11 @@ final class DepthModels {
             try {
                 release();
                 int passed = checkBackend("ZipDepth GPU FP16 allowed",
-                        () -> new ZipLiteBackend(modelAsset(ZIP_GPU), true, true, true), rgba, 3);
+                        () -> new ZipLiteBackend(context, ZIP_GPU, true, true, true), rgba, 3);
                 passed += checkBackend("ZipDepth GPU FP32 requested",
-                        () -> new ZipLiteBackend(modelAsset(ZIP_GPU), true, true, false), rgba, 3);
+                        () -> new ZipLiteBackend(context, ZIP_GPU, true, true, false), rgba, 3);
                 passed += checkBackend("ZipDepth CPU widescreen",
-                        () -> new ZipLiteBackend(modelAsset(ZIP_GPU), true, false, false), rgba, 3);
+                        () -> new ZipLiteBackend(context, ZIP_GPU, true, false, false), rgba, 3);
                 passed += checkBackend("ZipDepth CPU quantized", () -> loadCpu(1), rgba, 3);
                 try {
                     Log.i("AniartDepth", "ONNX Runtime providers " + OrtEnvironment.getAvailableProviders());
@@ -167,16 +170,23 @@ final class DepthModels {
                 passed += checkBackend("Limbo V3 CPU FP32", () -> loadCpu(2), rgba, 3);
                 passed += checkBackend("Limbo V3 CPU dynamic INT8 MatMul",
                         () -> loadLimbo(LIMBO_INT8, false), rgba, 3);
+                int total = 7;
+                if (hasAsset(LIMBO_LITERT)) {
+                    passed += checkBackend("Limbo V3 LiteRT GPU", () -> openLimboLiteRt(), rgba, 3);
+                    total++;
+                } else {
+                    Log.i("AniartDepth", "Limbo V3 LiteRT asset not bundled");
+                }
                 if (OrtEnvironment.getAvailableProviders().contains(OrtProvider.WEBGPU)) {
                     passed += checkBackend("Limbo V3 WebGPU", () -> loadLimbo(LIMBO_FILE, true), rgba, 3);
                     passed += checkBackend("Video Depth Anything WebGPU", () -> loadVideo(true), rgba, 2);
-                    report.accept("Глубина " + passed + "/9 · см. AniartDepth");
+                    total += 2;
                 } else {
                     Log.i("AniartDepth", "WebGPU unavailable in this ONNX Runtime");
-                    String htp = !video && OrtEnvironment.getAvailableProviders().contains(OrtProvider.QNN)
-                            ? " · QNN HTP: " + checkHtpDiagnostics() : "";
-                    report.accept("Глубина " + passed + "/7" + htp);
                 }
+                String htp = !video && OrtEnvironment.getAvailableProviders().contains(OrtProvider.QNN)
+                        ? " · QNN HTP: " + checkHtpDiagnostics() : "";
+                report.accept("Глубина " + passed + "/" + total + htp);
             } catch (Exception | LinkageError error) {
                 Log.w("AniartDepth", "Diagnostics failed", error);
                 report.accept("Ошибка диагностики. См. AniartDepth");
@@ -344,7 +354,7 @@ final class DepthModels {
                 float[] values;
                 try {
                     values = backend.infer(rgba);
-                } catch (RuntimeException | LinkageError error) {
+                } catch (Exception | LinkageError error) {
                     if (model != 1 || !isZipGpu() || job != epoch) throw error;
                     Log.w("AniartDepth", "ZipDepth GPU fallback", error);
                     release();
@@ -353,7 +363,7 @@ final class DepthModels {
                     values = backend.infer(rgba);
                 }
                 byte[] map = normalize(values, backend.width, backend.height - 2 * backend.contentPadding(),
-                        model == 2 || model == 7 || model == 8, reset, model == 3 || model == 9);
+                        model == 2 || model == 7 || model == 8 || model == 10, reset, model == 3 || model == 9);
                 long elapsed = (System.nanoTime() - started) / 1_000_000;
                 if (reset || ++liveMapCount % 32 == 0) {
                     float mapDelta = reset || lastLiveMap == null ? 0 : mapDelta(lastLiveMap, map);
@@ -406,25 +416,29 @@ final class DepthModels {
     private Backend load(int job, int model) throws Exception {
         if (model == 1) {
             try {
-                return new ZipLiteBackend(modelAsset(ZIP_GPU), true, true, true);
+                return new ZipLiteBackend(context, ZIP_GPU, true, true, true);
             } catch (Exception | LinkageError error) {
                 if (job != epoch || closed) throw error;
                 Log.w("AniartDepth", "ZipDepth GPU unavailable", error);
             }
         }
         return switch (model) {
-            case 4 -> new ZipLiteBackend(modelAsset(ZIP_GPU), true, true, false);
+            case 4 -> new ZipLiteBackend(context, ZIP_GPU, true, true, false);
             case 5 -> loadCpu(1);
-            case 6 -> new ZipLiteBackend(modelAsset(ZIP_GPU), true, false, false);
+            case 6 -> new ZipLiteBackend(context, ZIP_GPU, true, false, false);
             case 7 -> loadLimbo(LIMBO_INT8, false);
             case 8 -> loadLimbo(LIMBO_FILE, true);
             case 9 -> loadVideo(true);
+            case 10 -> {
+                if (!hasAsset(LIMBO_LITERT)) throw new IOException("Limbo V3 LiteRT asset not bundled");
+                yield openLimboLiteRt();
+            }
             default -> loadCpu(model);
         };
     }
 
     private Backend loadCpu(int model) throws Exception {
-        if (model == 1) return new ZipLiteBackend(modelAsset(ZIP_CPU), false, false, false);
+        if (model == 1) return new ZipLiteBackend(context, ZIP_CPU, false, false, false);
         if (model == 2) return loadLimbo(LIMBO_FILE, false);
         return loadVideo(false);
     }
@@ -617,61 +631,93 @@ final class DepthModels {
         void close() { closeSession(encoder); }
     }
 
-    private static final class ZipLiteBackend extends Backend {
-        private final boolean gpu, widescreen;
-        private final GpuDelegate delegate;
-        private final Interpreter interpreter;
-        private final ByteBuffer inputBuffer, outputBuffer;
+    private Backend openLimboLiteRt() throws Exception {
+        return new CompiledDepthBackend(context, LIMBO_LITERT, 504, 280, true, true,
+                CompiledModel.GpuOptions.Precision.FP16_WITH_FP32_ACCUM);
+    }
 
-        ZipLiteBackend(ByteBuffer file, boolean widescreen, boolean gpu, boolean allowFp16) throws Exception {
-            super(null, null, widescreen ? 320 : 256, widescreen ? 192 : 256, false, "image", null);
-            this.widescreen = widescreen;
-            this.gpu = gpu;
-            inputBuffer = ByteBuffer.allocateDirect(width * height * 3 * Float.BYTES).order(ByteOrder.nativeOrder());
-            outputBuffer = ByteBuffer.allocateDirect(width * height * Float.BYTES).order(ByteOrder.nativeOrder());
-            delegate = gpu ? new GpuDelegate(new GpuDelegate.Options().setPrecisionLossAllowed(allowFp16)) : null;
+    private static class CompiledDepthBackend extends Backend {
+        private final Environment environment;
+        private CompiledModel model;
+        private List<TensorBuffer> inputs = List.of(), outputs = List.of();
+
+        CompiledDepthBackend(Context context, String asset, int width, int height, boolean planar,
+                             boolean gpu, CompiledModel.GpuOptions.Precision precision) throws Exception {
+            super(null, width, height, planar, "image", null);
+            environment = Environment.create(context);
             try {
-                var options = new Interpreter.Options().setNumThreads(2);
-                if (delegate != null) options.addDelegate(delegate);
-                interpreter = new Interpreter(file, options);
-            } catch (RuntimeException | LinkageError error) {
-                if (delegate != null) delegate.close();
+                var accelerators = environment.getAvailableAccelerators();
+                var requested = gpu ? Accelerator.GPU : Accelerator.CPU;
+                Log.i("AniartDepth", "LiteRT " + asset + " | requested " + requested + " | available " + accelerators);
+                if (!accelerators.contains(requested)) throw new IOException("LiteRT " + requested + " unavailable");
+                var options = new CompiledModel.Options(requested);
+                if (gpu) {
+                    options.setGpuOptions(new CompiledModel.GpuOptions(null, null, null,
+                            precision, null, null, null, null, null, null, null, null, null, null, null));
+                } else {
+                    options.setCpuOptions(new CompiledModel.CpuOptions(2, null, null));
+                }
+                model = CompiledModel.create(context.getAssets(), "depth/" + asset, options, environment);
+                inputs = model.createInputBuffers();
+                outputs = model.createOutputBuffers();
+                if (inputs.size() != 1 || outputs.size() != 1) throw new IOException("Unexpected LiteRT model signature");
+            } catch (Exception | LinkageError error) {
+                try { close(); }
+                catch (RuntimeException cleanup) { error.addSuppressed(cleanup); }
                 throw error;
             }
         }
 
-        @Override int contentPadding() { return widescreen ? 6 : 0; }
-
-        @Override float[] infer(byte[] rgba) {
-            inputBuffer.clear();
-            inputBuffer.asFloatBuffer().put(rgb(rgba, false));
-            outputBuffer.clear();
-            interpreter.run(inputBuffer, outputBuffer);
-            // LiteRT may advance the destination to its end when it copies a tensor into it.
-            outputBuffer.clear();
-            var packed = outputBuffer.asFloatBuffer();
-            float[] depth = new float[width * (height - 2 * contentPadding())];
-            if (!widescreen) {
-                packed.get(depth);
-                return depth;
-            }
-            // Each packed value quartet contains a 2x2 block. Skip six padded rows on each side.
-            packed.position(width * contentPadding());
-            for (int y = 0; y < height - 2 * contentPadding(); y += 2) {
-                for (int x = 0; x < width; x += 2) {
-                    int pos = y * width + x;
-                    depth[pos] = Math.max(0, packed.get());
-                    depth[pos + 1] = Math.max(0, packed.get());
-                    depth[pos + width] = Math.max(0, packed.get());
-                    depth[pos + width + 1] = Math.max(0, packed.get());
-                }
-            }
-            return depth;
+        @Override float[] infer(byte[] rgba) throws Exception {
+            inputs.get(0).writeFloat(rgb(rgba, normalize));
+            model.run(inputs, outputs);
+            return outputs.get(0).readFloat();
         }
 
         @Override void close() {
-            try { interpreter.close(); }
-            finally { if (delegate != null) delegate.close(); }
+            try {
+                outputs.forEach(TensorBuffer::close);
+                inputs.forEach(TensorBuffer::close);
+            } finally {
+                try {
+                    if (model != null) model.close();
+                } finally {
+                    environment.close();
+                }
+            }
+        }
+    }
+
+    private static final class ZipLiteBackend extends CompiledDepthBackend {
+        private final boolean gpu, widescreen;
+
+        ZipLiteBackend(Context context, String asset, boolean widescreen, boolean gpu, boolean allowFp16)
+                throws Exception {
+            super(context, asset, widescreen ? 320 : 256, widescreen ? 192 : 256, false, gpu,
+                    allowFp16 ? CompiledModel.GpuOptions.Precision.FP16 : CompiledModel.GpuOptions.Precision.FP32);
+            this.widescreen = widescreen;
+            this.gpu = gpu;
+        }
+
+        @Override int contentPadding() { return widescreen ? 6 : 0; }
+
+        @Override float[] infer(byte[] rgba) throws Exception {
+            float[] packed = super.infer(rgba);
+            if (packed.length != width * height) throw new IOException("Unexpected ZipDepth tensor size " + packed.length);
+            if (!widescreen) return packed;
+            float[] depth = new float[width * (height - 2 * contentPadding())];
+            // Each packed value quartet contains a 2x2 block. Skip six padded rows on each side.
+            int index = width * contentPadding();
+            for (int y = 0; y < height - 2 * contentPadding(); y += 2) {
+                for (int x = 0; x < width; x += 2) {
+                    int pos = y * width + x;
+                    depth[pos] = Math.max(0, packed[index++]);
+                    depth[pos + 1] = Math.max(0, packed[index++]);
+                    depth[pos + width] = Math.max(0, packed[index++]);
+                    depth[pos + width + 1] = Math.max(0, packed[index++]);
+                }
+            }
+            return depth;
         }
     }
 

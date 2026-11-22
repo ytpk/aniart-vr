@@ -16,6 +16,9 @@ rgb = np.stack([np.where(foreground, 212, 35 + x / 4),
 Image.fromarray(rgb).save("frame.png")
 
 source = Path("convert_da3.py").read_text()
+# Use the runner's real SciPy. The upstream script's local PROPACK shim
+# breaks the sparse max-flow routine used during converter layout passes.
+source = source[:source.index("class _Dummy:")] + source[source.index("sys.path.insert"):]
 original = '''sd = load_file(hf_hub_download("depth-anything/DA3-SMALL", "model.safetensors"))
 net.load_state_dict({(k[6:] if k.startswith("model.") else k): v for k, v in sd.items()}, strict=False)'''
 replacement = '''sd = load_file("Limbo.safetensors")

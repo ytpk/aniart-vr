@@ -4,3 +4,4 @@ See section 4 of LICENSE.md for upstream notices.
 
 The benchmark includes the unmodified FP32 export and an Aniart VR adaptation
 with dynamic 8-bit quantization of constant MatMul weights for ONNX Runtime CPU.
+The LiteRT benchmark adapts the Limbo V3 checkpoint as a GPU-compatible LiteRT graph.

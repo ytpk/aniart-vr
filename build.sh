@@ -55,6 +55,12 @@ if [[ "${ANIART_DEPTH_BENCH:-0}" == 1 ]]; then
 else
     rm -f "$app/src/main/assets/depth/"{LimboV3_504x280_fp32.onnx,limbo-v3-cpu-dynamic-int8.onnx}
 fi
+litert_model="$app/src/main/assets/depth/limbo-v3-litert.tflite"
+if [[ -n "${ANIART_LIMBO_LITERT:-}" ]]; then
+    cp "$ANIART_LIMBO_LITERT" "$litert_model"
+else
+    rm -f "$litert_model"
+fi
 python3 generate_shaders.py Anime4K_Upscale_CNN_x2_S.glsl "$app/anime4k_generated.h"
 cd "$app"
 ./gradlew --no-daemon assembleDebug "$@"

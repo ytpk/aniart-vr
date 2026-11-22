@@ -4,6 +4,9 @@ on:
     branches: [main]
     paths:
       - 'tools/export_limbo_litert.*'
+      - 'overlay/**'
+      - 'build.sh'
+      - '.github/workflows/android.yml'
       - '.github/workflows/limbo-litert.yml'
   workflow_dispatch:
 permissions:
@@ -22,9 +25,17 @@ jobs:
           python -m pip install torch==2.10.0 torchvision==0.25.0 --index-url https://download.pytorch.org/whl/cpu
           python -m pip install litert-torch==0.9.4 onnxruntime==1.24.3 omegaconf addict einops opencv-python-headless e3nn
       - name: Export and compare with ONNX
-        run: bash tools/export_limbo_litert.sh "$RUNNER_TEMP/limbo-v3-litert.tflite"
+        run: |
+          output="$RUNNER_TEMP/limbo-litert"
+          bash tools/export_limbo_litert.sh "$output/limbo-v3-litert.tflite"
+          cp -R overlay/src/debug/assets/licenses/limbo "$output/licenses"
       - uses: actions/upload-artifact@v4
         with:
           name: Limbo-V3-LiteRT
-          path: ${{ runner.temp }}/limbo-v3-litert.tflite
+          path: ${{ runner.temp }}/limbo-litert/
           if-no-files-found: error
+  assemble:
+    needs: convert
+    uses: ./.github/workflows/android.yml
+    with:
+      bundle-limbo-litert: true
