@@ -40,6 +40,21 @@ index 2b50370..953c177 100644
        android:configChanges="screenSize|screenLayout|orientation|keyboardHidden|keyboard|navigation|uiMode|density"
        android:excludeFromRecents="false"
        android:launchMode="singleTask"
+diff --git a/src/tests/hello_xr/CMakeLists.txt b/src/tests/hello_xr/CMakeLists.txt
+index 93e708c..1c7558d 100644
+--- a/src/tests/hello_xr/CMakeLists.txt
++++ b/src/tests/hello_xr/CMakeLists.txt
+@@ -96,6 +96,10 @@ if(APPLE)
+     target_compile_features(hello_xr PUBLIC cxx_std_17)
+ endif()
+ 
++if(ANDROID)
++    target_compile_features(hello_xr PRIVATE cxx_std_17)
++endif()
++
+ set_target_properties(hello_xr PROPERTIES FOLDER ${SAMPLES_FOLDER})
+ source_group("Headers" FILES ${LOCAL_HEADERS})
+ source_group("Shaders" FILES ${VULKAN_SHADERS})
 diff --git a/src/tests/hello_xr/graphicsplugin_opengles.cpp b/src/tests/hello_xr/graphicsplugin_opengles.cpp
 index d5249e6..b4c9b99 100644
 --- a/src/tests/hello_xr/graphicsplugin_opengles.cpp

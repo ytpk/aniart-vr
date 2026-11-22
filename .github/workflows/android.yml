@@ -16,7 +16,16 @@ jobs:
           distribution: temurin
           java-version: '17'
       - name: Install Android tools
-        run: sdkmanager 'platforms;android-34' 'build-tools;34.0.0' 'ndk;23.2.8568313' 'cmake;3.22.1'
+        run: |
+          sdk="$RUNNER_TEMP/aniart-android-sdk"
+          mkdir -p "$sdk"
+          curl -fsSL --retry 3 https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip -o "$RUNNER_TEMP/android-tools.zip"
+          unzip -q "$RUNNER_TEMP/android-tools.zip" -d "$sdk"
+          manager="$sdk/cmdline-tools/bin/sdkmanager"
+          (set +o pipefail; yes | "$manager" --sdk_root="$sdk" --licenses >/dev/null)
+          "$manager" --sdk_root="$sdk" 'platforms;android-34' 'build-tools;34.0.0' 'ndk;23.2.8568313' 'cmake;3.22.1'
+          echo "ANDROID_HOME=$sdk" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$sdk" >> "$GITHUB_ENV"
       - name: Build APK
         run: ./build.sh
       - name: Verify packaging

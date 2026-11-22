@@ -23,7 +23,6 @@ android {
                     '-DBUILD_CONFORMANCE_TESTS=OFF', '-DBUILD_ALL_EXTENSIONS=ON',
                     '-DHELLOXR_DEFAULT_GRAPHICS_PLUGIN=OpenGLES'
                 targets 'openxr_loader', 'hello_xr'
-                cppFlags '-std=c++17'
             }
         }
     }
