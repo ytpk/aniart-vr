@@ -75,7 +75,8 @@ void main() {
 #extension GL_OES_EGL_image_external_essl3 : require
 precision highp float;
 uniform samplerExternalOES frame;
-uniform sampler2D enhanced, depthMap;
+uniform sampler2D enhanced, depthMap, priorDepth;
+uniform float depthBlend;
 uniform mat4 transform;
 uniform vec4 crop;
 uniform vec2 inset;
@@ -140,7 +141,7 @@ void main() {
     vec2 p = uv;
     if (shift != 0.0) {
         float mask = smoothstep(0.0, .06, min(uv.x, 1.0 - uv.x));
-        float disparity = clamp((texture(depthMap, uv).r - .5) * 1.65, -.45, .45);
+        float disparity = clamp((mix(texture(priorDepth, uv).r, texture(depthMap, uv).r, depthBlend) - .5) * 1.65, -.45, .45);
         p.x += shift * disparity * mask;
     }
     if (operation == 2 && abs(uv.x - .5) < .0016) {
@@ -165,6 +166,11 @@ void main() {
     GLuint oes = 0, panel = 0, vao = 0, fbo = 0, video = 0, flat = 0, beam = 0;
     GLuint textures[7]{}, passes[5]{}, depth = 0;
     static constexpr int depthCaptureW = 256, depthCaptureH = 144;
+    GLuint priorDepth = 0, depthReadback = 0;
+    GLsync readbackFence = nullptr;
+    bool hasPriorDepth = false;
+    float depthBlend = 1, depthStrength = 1, targetDepthStrength = 1;
+    std::chrono::steady_clock::time_point submittedDepth{}, deliveredDepth{}, lastMovieFrame{};
     GLuint depthCapture = 0, screenLight = 0, msaaDepth = 0;
     int msaaWidth = 0, msaaHeight = 0;
     PFNGLFRAMEBUFFERTEXTURE2DMULTISAMPLEEXTPROC bindMultisample = nullptr;
@@ -176,7 +182,7 @@ void main() {
     int depthModel = -1;
     jmethodID selectDepth = nullptr, wantsDepth = nullptr, submitDepth = nullptr, takeDepth = nullptr;
     jbyteArray depthInput = nullptr;
-    std::array<jbyte, depthCaptureW * depthCaptureH * 4> depthPixels{};
+    static constexpr int captureBytes = depthCaptureW * depthCaptureH * 4;
     std::array<jbyte, 192 * 108> depthValues{};
     std::chrono::steady_clock::time_point lastDepth{};
     enum class FilterStatus { Off, Active, Waiting, TooLarge, Unavailable };
@@ -262,6 +268,9 @@ void main() {
         glUniform2f(glGetUniformLocation(video, "sourceTexel"),
                     (layout == 1 ? 2.f : 1.f) / sourceW, (layout == 2 ? 2.f : 1.f) / sourceH);
         glUniform1f(glGetUniformLocation(video, "shift"), shift);
+        glUniform1f(glGetUniformLocation(video, "depthBlend"), depthBlend);
+        glActiveTexture(GL_TEXTURE3);
+        glBindTexture(GL_TEXTURE_2D, shift != 0 ? (hasPriorDepth ? priorDepth : depth) : 0);
         glActiveTexture(GL_TEXTURE2);
         glBindTexture(GL_TEXTURE_2D, shift != 0 ? depth : 0);
         glActiveTexture(GL_TEXTURE1);
@@ -298,9 +307,10 @@ void main() {
         if (captureDepth && Target(depthCapture, depthCaptureW, depthCaptureH)) {
             UseVideo(identity, 0, 0, 0, 0);
             glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
-            glReadPixels(0, 0, depthCaptureW, depthCaptureH, GL_RGBA, GL_UNSIGNED_BYTE, depthPixels.data());
-            env->SetByteArrayRegion(depthInput, 0, depthPixels.size(), depthPixels.data());
-            env->CallVoidMethod(activity, submitDepth, depthInput);
+            glBindBuffer(GL_PIXEL_PACK_BUFFER, depthReadback);
+            glReadPixels(0, 0, depthCaptureW, depthCaptureH, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+            readbackFence = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
+            glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
         }
         if (!enhance) return;
         filtered = false;
@@ -451,7 +461,7 @@ public:
         auto array = env->NewFloatArray(16);
         transformArray = static_cast<jfloatArray>(env->NewGlobalRef(array));
         env->DeleteLocalRef(array);
-        auto input = env->NewByteArray(depthPixels.size());
+        auto input = env->NewByteArray(captureBytes);
         depthInput = static_cast<jbyteArray>(env->NewGlobalRef(input));
         env->DeleteLocalRef(input);
         room.Open();
@@ -462,10 +472,17 @@ public:
         glGenTextures(7, textures);
         glGenTextures(1, &depth);
         glGenTextures(1, &depthCapture);
+        glGenTextures(1, &priorDepth);
+        glGenBuffers(1, &depthReadback);
+        glBindBuffer(GL_PIXEL_PACK_BUFFER, depthReadback);
+        glBufferData(GL_PIXEL_PACK_BUFFER, captureBytes, nullptr, GL_STREAM_READ);
+        glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
         glGenTextures(1, &screenLight);
         Texture(GL_TEXTURE_EXTERNAL_OES, oes, GL_LINEAR);
         Texture(GL_TEXTURE_2D, panel, GL_LINEAR);
         Texture(GL_TEXTURE_2D, depth, GL_LINEAR);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_R8, 192, 108, 0, GL_RED, GL_UNSIGNED_BYTE, nullptr);
+        Texture(GL_TEXTURE_2D, priorDepth, GL_LINEAR);
         glTexImage2D(GL_TEXTURE_2D, 0, GL_R8, 192, 108, 0, GL_RED, GL_UNSIGNED_BYTE, nullptr);
         Texture(GL_TEXTURE_2D, depthCapture, GL_LINEAR);
         glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, depthCaptureW, depthCaptureH, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
@@ -475,6 +492,7 @@ public:
         glUseProgram(video);
         glUniform1i(glGetUniformLocation(video, "enhanced"), 1);
         glUniform1i(glGetUniformLocation(video, "depthMap"), 2);
+        glUniform1i(glGetUniformLocation(video, "priorDepth"), 3);
         flat = Program(vertex, image);
         beam = Program(beamVertex, "#version 300 es\nprecision mediump float; uniform vec4 tint; out vec4 color; void main() { color = tint; }");
         try {
@@ -582,6 +600,7 @@ public:
             width = height = sourceW = sourceH = 0;
             filtered = depthReady = lightReady = false;
         } else if (newFrame) {
+            lastMovieFrame = now;
             sourceW = int((uint64_t(format) >> 48) & 0x7fff);
             sourceH = int((uint64_t(format) >> 32) & 0xffff);
             width = int((uint64_t(format) >> 16) & 0xffff);
@@ -594,7 +613,12 @@ public:
         if (depthModel != newModel || format < 0) {
             depthModel = newModel;
             depthReady = false;
-            lastDepth = {};
+            lastDepth = submittedDepth = deliveredDepth = {};
+            hasPriorDepth = false;
+            depthBlend = 1;
+            targetDepthStrength = depthStrength = depthModel == 0 ? 1 : 0;
+            if (readbackFence) glDeleteSync(readbackFence);
+            readbackFence = nullptr;
             env->CallVoidMethod(activity, selectDepth, depthModel);
         }
         const int layout = Layout();
@@ -612,6 +636,11 @@ public:
             auto map = static_cast<jbyteArray>(env->CallObjectMethod(activity, takeDepth));
             if (map) {
                 if (env->GetArrayLength(map) == depthValues.size()) {
+                    hasPriorDepth = depthReady;
+                    if (hasPriorDepth) std::swap(priorDepth, depth);
+                    deliveredDepth = now;
+                    const float age = std::chrono::duration<float>(now - submittedDepth).count();
+                    targetDepthStrength = std::clamp((.70f - age) / .48f, 0.f, 1.f);
                     env->GetByteArrayRegion(map, 0, depthValues.size(), depthValues.data());
                     glActiveTexture(GL_TEXTURE0);
                     glBindTexture(GL_TEXTURE_2D, depth);
@@ -620,7 +649,33 @@ public:
                 }
                 env->DeleteLocalRef(map);
             }
-            captureDepth = (newFrame || lastDepth.time_since_epoch().count() == 0)
+            if (depthReady) {
+                const float fade = std::chrono::duration<float>(now - deliveredDepth).count();
+                depthBlend = hasPriorDepth ? std::clamp(fade / .115f, 0.f, 1.f) : 1.f;
+                const bool advancing = now - lastMovieFrame < std::chrono::milliseconds(250);
+                const float speed = targetDepthStrength * (advancing ? std::clamp((1.1f - fade) / .5f, 0.f, 1.f) : 1.f);
+                depthStrength += (speed - depthStrength) * .10f;
+            }
+            if (readbackFence) {
+                const GLenum ready = glClientWaitSync(readbackFence, 0, 0);
+                if (ready != GL_TIMEOUT_EXPIRED) {
+                    glDeleteSync(readbackFence);
+                    readbackFence = nullptr;
+                    if (ready != GL_WAIT_FAILED && env->CallBooleanMethod(activity, wantsDepth)) {
+                        glBindBuffer(GL_PIXEL_PACK_BUFFER, depthReadback);
+                        const auto* data = static_cast<const jbyte*>(
+                                glMapBufferRange(GL_PIXEL_PACK_BUFFER, 0, captureBytes, GL_MAP_READ_BIT));
+                        if (data) {
+                            env->SetByteArrayRegion(depthInput, 0, captureBytes, data);
+                            glUnmapBuffer(GL_PIXEL_PACK_BUFFER);
+                            submittedDepth = lastDepth;
+                            env->CallVoidMethod(activity, submitDepth, depthInput);
+                        }
+                        glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
+                    }
+                }
+            }
+            captureDepth = !readbackFence && (newFrame || lastDepth.time_since_epoch().count() == 0)
                            && now - lastDepth >= std::chrono::milliseconds(125)
                            && env->CallBooleanMethod(activity, wantsDepth);
             if (captureDepth) lastDepth = now;
@@ -676,7 +731,8 @@ public:
         if (width && sourceW && sourceH) {
             const int view = (eye != 0) ^ ((config & 256) != 0);
             const int operation = filtered && filteredLayout == layout ? ((config & 16) ? 2 : 1) : 0;
-            const float shift = depthReady ? (view ? 1 : -1) * ((config >> 9) & 15) * .003f : 0;
+            const float scale = depthModel == 0 ? .00125f : .003f * depthStrength;
+            const float shift = depthReady ? (view ? 1 : -1) * ((config >> 9) & 15) * scale : 0;
             UseVideo(QuadMatrix(vp, screen, actualWidth, h, front), layout, layout ? view : 0, operation, shift, (config >> 18) & 3);
             glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
         } else {
@@ -705,6 +761,9 @@ public:
         glDeleteTextures(7, textures);
         glDeleteTextures(1, &depth);
         glDeleteTextures(1, &depthCapture);
+        glDeleteTextures(1, &priorDepth);
+        if (readbackFence) glDeleteSync(readbackFence);
+        glDeleteBuffers(1, &depthReadback);
         glDeleteTextures(1, &screenLight);
         if (msaaDepth) glDeleteRenderbuffers(1, &msaaDepth);
         glDeleteFramebuffers(1, &fbo);

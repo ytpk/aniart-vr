@@ -47,6 +47,14 @@ jobs:
           unzip -Z1 "$apk" | grep -qx 'lib/arm64-v8a/libpython3.12.so'
           unzip -Z1 "$apk" | grep -qx 'lib/arm64-v8a/libonnxruntime4j_jni.so'
           unzip -Z1 "$apk" | grep -qx 'lib/arm64-v8a/libtensorflowlite_gpu_jni.so'
+          python3 - "$apk" <<'PY'
+          import sys
+          from zipfile import ZIP_STORED, ZipFile
+          with ZipFile(sys.argv[1]) as apk:
+              for model in ("zipdepth-wide-320x180-t320x192-edgepad-gpu.tflite", "zipdepth-base-256-cpu.tflite",
+                            "encoder_fp16.onnx", "bootstrap_fp16.onnx", "stream_fp16.onnx"):
+                  assert apk.getinfo("assets/depth/" + model).compress_type == ZIP_STORED, model
+          PY
           unzip -p "$apk" assets/chaquopy/requirements-common.imy > "$RUNNER_TEMP/aniart-requirements.zip"
           unzip -Z1 "$RUNNER_TEMP/aniart-requirements.zip" > "$RUNNER_TEMP/aniart-requirements.list"
           grep -qx 'lxml/etree.so' "$RUNNER_TEMP/aniart-requirements.list"

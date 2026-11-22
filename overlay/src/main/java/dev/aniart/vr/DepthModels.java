@@ -9,8 +9,6 @@ import java.io.File;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
-import java.net.HttpURLConnection;
-import java.net.URI;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.FloatBuffer;
@@ -30,9 +28,8 @@ import org.tensorflow.lite.gpu.GpuDelegate;
 final class DepthModels {
     static final String LIMBO_FILE = "LimboV3_504x280_fp32.onnx";
     static final int CAPTURE_W = 256, CAPTURE_H = 144, MAP_W = 192, MAP_H = 108;
-    private static final String VDA = "https://huggingface.co/EmreGneri/video-depth-anything-small-stream/resolve/56ff0a88aaf2262d50d5d82d69b47e9d40e1c991/";
-    private static final String ZIP = "https://huggingface.co/lc700x/ZipDepth-EdgePad/resolve/main/";
-    private static final String ZIP_GPU = "https://github.com/tB0nE/nightfall/releases/download/edgepad-models-2026-10-08/";
+    private static final String ZIP_GPU = "zipdepth-wide-320x180-t320x192-edgepad-gpu.tflite";
+    private static final String ZIP_CPU = "zipdepth-base-256-cpu.tflite";
     private static final String LIMBO_HASH = "6a8f894f08fdb651036c3e6875bf357574b03003a4da2ae1ca9e82b66fc8534f";
     private static final float[] MEAN = {.485f, .456f, .406f};
     private static final float[] STD = {.229f, .224f, .225f};
@@ -107,23 +104,25 @@ final class DepthModels {
                 try {
                     values = backend.infer(rgba);
                 } catch (RuntimeException | LinkageError error) {
-                    if (!(backend instanceof ZipGpuBackend) || job != epoch) throw error;
+                    if (!isZipGpu() || job != epoch) throw error;
                     Log.w("AniartDepth", "ZipDepth GPU fallback", error);
                     release();
-                    backend = loadCpu(job, model);
+                    backend = loadCpu(model);
                     loaded = model;
                     values = backend.infer(rgba);
                 }
-                byte[] map = normalize(values, backend.width, backend.height, model == 2, reset);
+                byte[] map = normalize(values, backend.width, backend.height - 2 * backend.contentPadding(), model == 2, reset);
                 if (job == epoch && !closed) {
                     result.set(new MapFrame(job, map));
-                    update(job, (backend instanceof ZipGpuBackend ? "GPU " : "CPU ")
+                    update(job, (isZipGpu() ? "GPU " : "CPU ")
                             + Math.round((System.nanoTime() - started) / 1_000_000.0) + " мс");
                 }
             } catch (Exception | LinkageError error) {
                 if (job == epoch && !closed) {
                     failed = true;
-                    update(job, error instanceof MissingWeights ? "Нужен файл Limbo V3" : "Ошибка модели");
+                    update(job, error instanceof MissingWeights ? "Нужен файл Limbo V3"
+                            : error instanceof ai.onnxruntime.OrtException ortError ? "ONNX: " + ortError.getCode()
+                            : "Модель: " + error.getClass().getSimpleName());
                     Log.w("AniartDepth", label(model), error);
                 }
             } finally {
@@ -131,6 +130,8 @@ final class DepthModels {
             }
         });
     }
+
+    private boolean isZipGpu() { return backend instanceof ZipLiteBackend zip && zip.gpu; }
 
     private void update(int job, String text) {
         if (job == epoch && !closed) status = text;
@@ -152,27 +153,21 @@ final class DepthModels {
     private Backend load(int job, int model) throws Exception {
         if (model == 1) {
             try {
-                File file = modelFile(job, ZIP_GPU, "zipdepth-wide-512x288-edgepad-gpu.tflite", 12342180,
-                        "dfa40c15155df2a7ae2eb2ccdf78da610ae4722b1cc388fa93e6888bcc78d0df");
-                return new ZipGpuBackend(file);
+                return new ZipLiteBackend(modelAsset(ZIP_GPU), true);
             } catch (Exception | LinkageError error) {
                 if (job != epoch || closed) throw error;
                 Log.w("AniartDepth", "ZipDepth GPU unavailable", error);
             }
         }
-        return loadCpu(job, model);
+        return loadCpu(model);
     }
 
-    private Backend loadCpu(int job, int model) throws Exception {
+    private Backend loadCpu(int model) throws Exception {
+        if (model == 1) return new ZipLiteBackend(modelAsset(ZIP_CPU), false);
         OrtEnvironment ort = OrtEnvironment.getEnvironment();
         try (var options = new OrtSession.SessionOptions()) {
             options.setIntraOpNumThreads(2);
             options.setInterOpNumThreads(1);
-            if (model == 1) {
-                File file = modelFile(job, ZIP, "zipdepth_wide_512x288.onnx", 24625797,
-                        "197d598f50ee3270b12831096dbab260c6bd5979bab13b87f01a28fad0268274");
-                return new Backend(ort, options, 512, 288, false, "image", file);
-            }
             if (model == 2) {
                 File file = new File(context.getFilesDir(), LIMBO_FILE);
                 if (!file.isFile() || file.length() != 100449120 || !LIMBO_HASH.equals(sha256(file))) {
@@ -180,18 +175,20 @@ final class DepthModels {
                 }
                 return new Backend(ort, options, 504, 280, true, "image", file);
             }
-            File encoder = modelFile(job, VDA, "encoder_fp16.onnx", 43327081,
-                    "3c774358e5dc294fd69366869e4cae5eb27d240658194043c291899cc577f6a1");
-            File bootstrap = modelFile(job, VDA, "bootstrap_fp16.onnx", 14170095,
-                    "bc8bef05465c2a80e7ac2ee166a7b553bf0e54f4c64f328866b24a9ebd34d564");
-            File stream = modelFile(job, VDA, "stream_fp16.onnx", 15536625,
-                    "9120ea5b7b45730c246f9f41cb5352bfe5988097f5912dd29c35ba6a4d7a227b");
-            return new VideoBackend(ort, options, encoder, bootstrap, stream);
+            return new VideoBackend(ort, options, modelAsset("encoder_fp16.onnx"),
+                    modelAsset("bootstrap_fp16.onnx"), modelAsset("stream_fp16.onnx"));
+        }
+    }
+
+    private ByteBuffer modelAsset(String file) throws IOException {
+        try (var descriptor = context.getAssets().openFd("depth/" + file);
+             var stream = descriptor.createInputStream()) {
+            return stream.getChannel().map(java.nio.channels.FileChannel.MapMode.READ_ONLY,
+                    descriptor.getStartOffset(), descriptor.getLength());
         }
     }
 
     private static final class MissingWeights extends IOException {}
-
     void importLimbo(InputStream input) throws Exception {
         File file = new File(context.getFilesDir(), LIMBO_FILE);
         File temp = File.createTempFile("limbo", ".onnx", context.getFilesDir());
@@ -208,42 +205,6 @@ final class DepthModels {
             if (temp.length() != 100449120 || !LIMBO_HASH.equals(sha256(temp))) throw new MissingWeights();
             Files.move(temp.toPath(), file.toPath(), java.nio.file.StandardCopyOption.REPLACE_EXISTING);
         } finally {
-            Files.deleteIfExists(temp.toPath());
-        }
-    }
-
-    private File modelFile(int job, String base, String name, long size, String hash) throws Exception {
-        File folder = new File(context.getFilesDir(), "depth-models");
-        if (!folder.isDirectory() && !folder.mkdirs()) throw new IOException("Cannot create model directory");
-        File file = new File(folder, name);
-        if (file.isFile() && file.length() == size && hash.equals(sha256(file))) return file;
-        File temp = File.createTempFile(name, ".download", folder);
-        var connection = (HttpURLConnection) URI.create(base + name + "?download=true").toURL().openConnection();
-        connection.setConnectTimeout(12000);
-        connection.setReadTimeout(12000);
-        try {
-            try (var input = connection.getInputStream(); var output = new FileOutputStream(temp)) {
-                byte[] buffer = new byte[65536];
-                long total = 0;
-                int progress = -1;
-                for (int count; (count = input.read(buffer)) != -1;) {
-                    if (closed || job != epoch) throw new IOException("Cancelled model download");
-                    total += count;
-                    if (total > size) throw new IOException("Model was larger than expected");
-                    output.write(buffer, 0, count);
-                    int percent = (int) (total * 100 / size);
-                    if (percent != progress) {
-                        progress = percent;
-                        update(job, "Загрузка модели " + percent + "%");
-                    }
-                }
-            }
-            if (temp.length() != size || !hash.equals(sha256(temp))) throw new IOException("Invalid model checksum");
-            Files.move(temp.toPath(), file.toPath(), java.nio.file.StandardCopyOption.REPLACE_EXISTING);
-            update(job, "Подготовка модели…");
-            return file;
-        } finally {
-            connection.disconnect();
             Files.deleteIfExists(temp.toPath());
         }
     }
@@ -271,20 +232,27 @@ final class DepthModels {
 
         Backend(OrtEnvironment ort, OrtSession.SessionOptions options, int width, int height,
                 boolean normalize, String inputName, File file) throws Exception {
+            this(ort, width, height, normalize, inputName, file == null ? null : ort.createSession(file.getAbsolutePath(), options));
+        }
+
+        Backend(OrtEnvironment ort, int width, int height, boolean normalize, String inputName, OrtSession encoder) {
             this.ort = ort;
             this.width = width;
             this.height = height;
             this.normalize = normalize;
             this.inputName = inputName;
-            encoder = file == null ? null : ort.createSession(file.getAbsolutePath(), options);
+            this.encoder = encoder;
         }
 
         float[] rgb(byte[] rgba, boolean planar) {
             int pixels = width * height;
             float[] rgb = new float[pixels * 3];
+            int padding = contentPadding();
+            int contentHeight = height - 2 * padding;
             for (int y = 0; y < height; y++) {
                 // GL readback is bottom-up. Models expect top-down RGB.
-                float srcY = (height - y - .5f) * CAPTURE_H / height - .5f;
+                int row = clamp(y - padding, contentHeight);
+                float srcY = (contentHeight - row - .5f) * CAPTURE_H / contentHeight - .5f;
                 int y0 = clamp((int) Math.floor(srcY), CAPTURE_H);
                 int y1 = clamp((int) Math.ceil(srcY), CAPTURE_H);
                 for (int x = 0; x < width; x++) {
@@ -321,34 +289,48 @@ final class DepthModels {
             }
         }
 
+        int contentPadding() { return 0; }
         void reset() {}
         void close() { closeSession(encoder); }
     }
 
-    private static final class ZipGpuBackend extends Backend {
+    private static final class ZipLiteBackend extends Backend {
+        private final boolean gpu;
         private final GpuDelegate delegate;
         private final Interpreter interpreter;
         private final ByteBuffer inputBuffer, outputBuffer;
 
-        ZipGpuBackend(File file) throws Exception {
-            super(null, null, 512, 288, false, "image", null);
+        ZipLiteBackend(ByteBuffer file, boolean gpu) throws Exception {
+            super(null, null, gpu ? 320 : 256, gpu ? 192 : 256, false, "image", null);
+            this.gpu = gpu;
             inputBuffer = ByteBuffer.allocateDirect(width * height * 3 * Float.BYTES).order(ByteOrder.nativeOrder());
             outputBuffer = ByteBuffer.allocateDirect(width * height * Float.BYTES).order(ByteOrder.nativeOrder());
-            delegate = new GpuDelegate(new GpuDelegate.Options().setPrecisionLossAllowed(true));
+            delegate = gpu ? new GpuDelegate(new GpuDelegate.Options().setPrecisionLossAllowed(true)) : null;
             try {
-                interpreter = new Interpreter(file, new Interpreter.Options().addDelegate(delegate));
+                var options = new Interpreter.Options().setNumThreads(2);
+                if (delegate != null) options.addDelegate(delegate);
+                interpreter = new Interpreter(file, options);
             } catch (RuntimeException | LinkageError error) {
-                delegate.close();
+                if (delegate != null) delegate.close();
                 throw error;
             }
         }
 
+        @Override int contentPadding() { return gpu ? 6 : 0; }
+
         @Override float[] infer(byte[] rgba) {
             inputBuffer.asFloatBuffer().put(rgb(rgba, false));
+            outputBuffer.rewind();
             interpreter.run(inputBuffer, outputBuffer);
             var packed = outputBuffer.asFloatBuffer();
-            float[] depth = new float[width * height];
-            for (int y = 0; y < height; y += 2) {
+            float[] depth = new float[width * (height - 2 * contentPadding())];
+            if (!gpu) {
+                packed.get(depth);
+                return depth;
+            }
+            // Each packed value quartet contains a 2x2 block. Skip six padded rows on each side.
+            packed.position(width * contentPadding());
+            for (int y = 0; y < height - 2 * contentPadding(); y += 2) {
                 for (int x = 0; x < width; x += 2) {
                     int pos = y * width + x;
                     depth[pos] = Math.max(0, packed.get());
@@ -362,7 +344,7 @@ final class DepthModels {
 
         @Override void close() {
             try { interpreter.close(); }
-            finally { delegate.close(); }
+            finally { if (delegate != null) delegate.close(); }
         }
     }
 
@@ -372,13 +354,13 @@ final class DepthModels {
         private static final int[] SPATIAL = {209, 209, 60, 60, 209, 209, 836, 836};
         private static final int[] CHANNELS = {192, 192, 384, 384, 64, 64, 64, 64};
 
-        VideoBackend(OrtEnvironment ort, OrtSession.SessionOptions options, File first, File initial, File recurrent)
-                throws Exception {
-            super(ort, options, 266, 154, true, "pixels", first);
+        VideoBackend(OrtEnvironment ort, OrtSession.SessionOptions options, ByteBuffer first,
+                     ByteBuffer initial, ByteBuffer recurrent) throws Exception {
+            super(ort, 266, 154, true, "pixels", ort.createSession(first, options));
             OrtSession start = null;
             try {
-                start = ort.createSession(initial.getAbsolutePath(), options);
-                stream = ort.createSession(recurrent.getAbsolutePath(), options);
+                start = ort.createSession(initial, options);
+                stream = ort.createSession(recurrent, options);
                 bootstrap = start;
             } catch (Exception error) {
                 closeSession(start);
