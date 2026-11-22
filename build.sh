@@ -18,6 +18,8 @@ else
     git -C "$source" apply --reverse --check "$patch"
 fi
 app="$source/src/tests/hello_xr"
+# The generated copy must also reflect Java files removed from the overlay.
+rm -rf "$app/src/main/java/dev/aniart/vr"
 cp -R overlay/. "$app/"
 python3 generate_shaders.py Anime4K_Upscale_CNN_x2_S.glsl "$app/anime4k_generated.h"
 cd "$app"
