@@ -5,10 +5,12 @@ from importlib import import_module
 from collections import defaultdict
 from decimal import Decimal, InvalidOperation
 import re
+import socket
+import ssl
 import warnings
 from urllib.parse import urljoin, urlsplit
 
-from anicli_api._http import HTTPSync
+from anicli_api._http import HTTPSync, HTTPRetryConnectSyncTransport
 from anicli_api._logger import logger
 import httpx
 
@@ -64,6 +66,26 @@ class CatalogError(Exception):
     pass
 
 
+class CatalogTransport(HTTPRetryConnectSyncTransport):
+    # Upstream makes one final request after its retry loop.
+    ATTEMPTS_CONNECT = 1
+
+    def handle_request(self, request):
+        host = request.url.host
+        try:
+            response = super().handle_request(request)
+        except httpx.HTTPError as error:
+            chain = error
+            types = []
+            while chain is not None and len(types) < 8:
+                types.append(type(chain).__name__)
+                chain = chain.__cause__ or chain.__context__
+            print(f"AniCli HTTP {host} failed {'/'.join(types)}", flush=True)
+            raise
+        print(f"AniCli HTTP {host} status={response.status_code}", flush=True)
+        return response
+
+
 def _run(call, *args):
     try:
         return call(*args)
@@ -71,9 +93,17 @@ def _run(call, *args):
         raise CatalogError(f"HTTP {error.response.status_code}") from None
     except httpx.TimeoutException:
         raise CatalogError("Сервис не ответил вовремя") from None
-    except httpx.RequestError:
+    except httpx.RequestError as error:
+        cause = error
+        while cause is not None:
+            if isinstance(cause, ssl.SSLCertVerificationError):
+                raise CatalogError("Ошибка проверки HTTPS-сертификата") from None
+            if isinstance(cause, socket.gaierror):
+                raise CatalogError("DNS не смог найти сервер") from None
+            cause = cause.__cause__ or cause.__context__
         raise CatalogError("Сервис недоступен из этой сети") from None
-    except Exception:
+    except Exception as error:
+        print(f"AniCli extractor failed {type(error).__name__}", flush=True)
         raise CatalogError("Не удалось прочитать ответ сервиса") from None
 
 
@@ -82,7 +112,7 @@ def _extractor(provider):
     if provider not in dict(PROVIDERS):
         raise ValueError("Unknown provider")
     module = import_module(f"anicli_api.source.{provider}")
-    return module.Extractor(http_client=HTTPSync(timeout=10.0))
+    return module.Extractor(http_client=HTTPSync(timeout=6.0, transport=CatalogTransport(http2=True)))
 
 
 def titles(provider, query):

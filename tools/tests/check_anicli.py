@@ -1,3 +1,5 @@
+from contextlib import redirect_stdout
+from io import StringIO
 import pkgutil
 from types import SimpleNamespace
 import unittest
@@ -52,6 +54,18 @@ class AniCliCheck(unittest.TestCase):
         response = httpx.Response(403, request=request)
         with self.assertRaisesRegex(bridge.CatalogError, '^HTTP 403$'):
             bridge._run(response.raise_for_status)
+
+    def test_failed_connection_retries_once_and_logs_only_host(self):
+        output = StringIO()
+        request = httpx.Request('GET', 'https://player.example/watch?signature=private')
+        error = httpx.ConnectTimeout('timeout')
+        with bridge.CatalogTransport() as transport, redirect_stdout(output), \
+                patch('anicli_api._http.sleep'), \
+                patch.object(httpx.HTTPTransport, 'handle_request', side_effect=error) as send:
+            with self.assertRaises(httpx.ConnectTimeout):
+                transport.handle_request(request)
+        self.assertEqual(send.call_count, 2)
+        self.assertEqual(output.getvalue().strip(), 'AniCli HTTP player.example failed ConnectTimeout')
 
     def test_yummy_preserves_fractional_episodes(self):
         from anicli_api.source.yummy_anime import Anime, YummyAnimeApi

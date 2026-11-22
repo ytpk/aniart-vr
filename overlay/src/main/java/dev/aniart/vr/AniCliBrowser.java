@@ -4,6 +4,7 @@ import android.content.Context;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.net.Uri;
+import android.util.Log;
 import android.util.LruCache;
 import com.chaquo.python.PyException;
 import com.chaquo.python.PyObject;
@@ -27,6 +28,8 @@ import java.util.function.Consumer;
 import java.util.stream.Collectors;
 
 final class AniCliBrowser {
+    private static final String TAG = "AniCliVR";
+
     enum Kind { PROVIDERS, TITLES, OPTIONS }
 
     record Row(String label, Runnable open) {}
@@ -83,7 +86,7 @@ final class AniCliBrowser {
         if (screen != null) return;
         var next = new Screen(Kind.PROVIDERS, "Источники ani-cli", "Выберите каталог", null);
         screen = next;
-        load(next, this::providers, items -> next.rows = items.stream()
+        load(next, "providers", this::providers, items -> next.rows = items.stream()
                 .map(item -> new Row(item.name(), () -> openTitles(item, ""))).collect(Collectors.toList()));
     }
 
@@ -126,7 +129,7 @@ final class AniCliBrowser {
         if (screen.kind == Kind.TITLES) screen = next;
         else push(next);
         if (provider == null) searchAll(next);
-        else load(next, () -> titles(provider, query), titles -> {
+        else load(next, query.isEmpty() ? "ongoing" : "search", () -> titles(provider, query), titles -> {
             next.titles = titles;
             if (titles.isEmpty()) next.status = "Тайтлы не найдены или каталог недоступен";
         });
@@ -140,14 +143,17 @@ final class AniCliBrowser {
     private void searchAll(Screen target) {
         target.titles = List.of();
         target.retry = null;
-        load(target, this::providers, providers -> {
+        load(target, "search providers", this::providers, providers -> {
             int[] pendingProviders = {providers.size()};
             int[] failures = {0};
             target.loading = true;
             target.status = "Поиск по источникам…";
             for (Provider provider : providers) network.execute(() -> {
+                String stage = provider.id() + " search";
+                Log.i(TAG, stage + " started");
                 try {
                     var matches = titles(provider, target.subtitle);
+                    Log.i(TAG, stage + " results=" + matches.size());
                     updates.add(() -> {
                         var combined = new ArrayList<>(target.titles);
                         combined.addAll(matches);
@@ -155,6 +161,7 @@ final class AniCliBrowser {
                         finishSearch(target, pendingProviders, failures[0]);
                     });
                 } catch (Exception error) {
+                    logFailure(stage, error);
                     updates.add(() -> finishSearch(target, pendingProviders, ++failures[0]));
                 }
             });
@@ -190,7 +197,7 @@ final class AniCliBrowser {
 
     void select(Title title) {
         var next = options(title, title.provider().name() + "  ·  Выберите серию");
-        load(next, () -> bridge().callAttr("episodes", title.item()).asList().stream().map(PyObject::asList).map(value ->
+        load(next, "episodes", () -> bridge().callAttr("episodes", title.item()).asList().stream().map(PyObject::asList).map(value ->
                 new Episode(value.get(0).toString(), value.get(1).toString(), value.get(2))).collect(Collectors.toList()), episodes -> {
             var rows = new ArrayList<Row>();
             for (int index = 0; index < episodes.size(); index++) {
@@ -213,7 +220,7 @@ final class AniCliBrowser {
 
     private void dubbers(Title title, List<Episode> episodes, int index) {
         var next = options(title, episodes.get(index).number() + "  ·  Выберите озвучку");
-        load(next, () -> voices(episodes.get(index)), items -> {
+        load(next, "voices", () -> voices(episodes.get(index)), items -> {
             next.rows = items.stream().map(item -> new Row(item.label(),
                     () -> qualities(title, episodes, index, item))).collect(Collectors.toList());
             if (items.isEmpty()) next.status = "Источник не вернул озвучки для этой серии";
@@ -251,7 +258,7 @@ final class AniCliBrowser {
     }
 
     private void loadQualities(Screen next, Title title, List<Episode> episodes, int index, Voice voice) {
-        load(next, () -> streams(voice), items -> {
+        load(next, "streams", () -> streams(voice), items -> {
             var rows = new ArrayList<Row>();
             for (Stream item : items) {
                 String format = switch (item.mime()) {
@@ -297,32 +304,47 @@ final class AniCliBrowser {
         return selection(title, episodes, index, voice, preferred.orElse(items.get(0)));
     }
 
-    private <T> void load(Screen target, Callable<T> task, Consumer<T> accept) {
+    private <T> void load(Screen target, String operation, Callable<T> task, Consumer<T> accept) {
         target.loading = true;
         target.status = "Загрузка…";
         target.retry = null;
+        String stage = target.provider == null ? operation : target.provider.id() + " " + operation;
         network.execute(() -> {
+            Log.i(TAG, stage + " started");
             try {
                 T result = task.call();
+                String count = result instanceof List<?> items ? " results=" + items.size() : "";
+                Log.i(TAG, stage + " completed" + count);
                 updates.add(() -> {
                     target.loading = false;
                     target.status = "";
                     accept.accept(result);
                 });
-            } catch (Exception error) {
+            } catch (Exception | LinkageError error) {
+                logFailure(stage, error);
                 updates.add(() -> {
                     target.loading = false;
                     target.status = errorStatus(error);
-                    target.retry = () -> load(target, task, accept);
+                    target.retry = () -> load(target, operation, task, accept);
                 });
             }
         });
     }
 
-    static String errorStatus(Exception error) {
+    private static void logFailure(String stage, Throwable error) {
+        // Python exception bodies can contain signed URLs. Keep only the exception type.
+        String type = error.getClass().getSimpleName();
+        if (error instanceof PyException && error.getMessage() != null) {
+            String[] parts = error.getMessage().split(": ", 2);
+            if (parts.length == 2 && parts[0].matches("[A-Za-z_][A-Za-z0-9_.]{0,100}")) type = parts[0];
+        }
+        Log.w(TAG, stage + " failed " + type + " (" + errorStatus(error) + ")");
+    }
+
+    static String errorStatus(Throwable error) {
         String message = error.getMessage();
-        if (error instanceof PyException && message != null && message.startsWith("CatalogError: ")) {
-            return message.substring("CatalogError: ".length());
+        if (error instanceof PyException && message != null && message.matches("(?s)(?:anicli_bridge\\.)?CatalogError: .*")) {
+            return message.substring(message.indexOf(": ") + 2);
         }
         return "Не удалось загрузить данные ani-cli";
     }
