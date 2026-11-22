@@ -120,10 +120,10 @@ Media3 выводит декодированные кадры в `SurfaceTexture
 Подключите Quest по ADB и запустите команду ниже. В настройках приложения нажмите **Диагностика 3D** и дождитесь строки `Diagnostics end`. Кнопка проверяет ZipDepth отдельно на GPU и CPU, оба этапа Video Depth Anything и Limbo при наличии весов. Для проверки используется синтетический кадр, поэтому открывать видео не требуется.
 
 ```sh
-adb logcat -v threadtime -T 1 -s AniartDepth tflite LiteRT linker AndroidRuntime > aniart-depth-check.txt
+adb logcat -v threadtime -T 1 -s AniartDepth tflite LiteRT onnxruntime adsprpc cdsprpc linker AndroidRuntime > aniart-depth-check.txt
 ```
 
-Эта же кнопка запускает тест **QNN HTP** с отключённым CPU fallback. Тест проверяет численный результат 8-битной свёртки и пишет `QNN HTP PASS` или `QNN HTP FAIL` с этапом ошибки. Он проверяет доступ к Hexagon и не меняет бэкенд моделей глубины. Используются ONNX Runtime QNN 1.24.3 и Qualcomm QNN Runtime 2.42.0. [QNN Execution Provider](https://onnxruntime.ai/docs/execution-providers/QNN-ExecutionProvider.html), [лицензия Qualcomm](overlay/src/main/assets/licenses/qnn/LICENSE.pdf), [уведомления](overlay/src/main/assets/licenses/qnn/NOTICE.txt).
+Эта же кнопка запускает три проверки **QNN HTP**. `QNN direct` проверяет загрузку FastRPC и вызывает `backendCreate` через Qualcomm QNN. `QNN HTP auto` и `QNN HTP XR2 Gen 2` проверяют результат 8-битной свёртки без отката на CPU. Во втором прогоне ONNX Runtime получает явные параметры `soc_model=53` и `htp_arch=69`. Каждый прогон пишет в лог свой результат и этап сбоя. Используются ONNX Runtime QNN 1.24.3 и Qualcomm QNN Runtime 2.42.0. [QNN Execution Provider](https://onnxruntime.ai/docs/execution-providers/QNN-ExecutionProvider.html), [лицензия Qualcomm](overlay/src/main/assets/licenses/qnn/LICENSE.pdf), [уведомления](overlay/src/main/assets/licenses/qnn/NOTICE.txt).
 
 Веса ZipDepth и Video Depth Anything скачиваются при сборке и проверяются по SHA-256. Если на Quest нет файлового менеджера для импорта Limbo, в debug-сборке можно загрузить файл через ADB и снова выбрать Limbo V3:
 

@@ -9,6 +9,7 @@
 #include "anime4k_generated.h"
 #include "cinema_input.h"
 #include "cinema_pointer.h"
+#include "qnn_htp_probe.h"
 
 namespace Cinema {
 inline GLuint Program(const char* vertex, const char* fragment) {

@@ -122,7 +122,7 @@ final class DepthModels {
                     limbo = "нет файла";
                     Log.i("AniartDepth", "Limbo V3 CPU skipped: weights not installed");
                 }
-                String htp = checkHtp() ? "OK" : "см. лог";
+                String htp = checkHtpDiagnostics();
                 report.accept("Глубина " + passed + "/3 · Limbo: " + limbo + " · QNN HTP: " + htp);
             } catch (Exception | LinkageError error) {
                 Log.w("AniartDepth", "Diagnostics failed", error);
@@ -136,9 +136,11 @@ final class DepthModels {
         });
     }
 
-    private boolean checkHtp() {
-        String stage = "prepare";
-        try (var options = new OrtSession.SessionOptions()) {
+    private static native boolean runDirectHtp(String backendPath);
+
+    private String checkHtpDiagnostics() {
+        final String backendPath;
+        try {
             String nativeDir = context.getApplicationInfo().nativeLibraryDir;
             String searchPath = Os.getenv("ADSP_LIBRARY_PATH");
             if (searchPath == null || searchPath.isEmpty()) {
@@ -148,16 +150,45 @@ final class DepthModels {
             if (!searchPath.startsWith(nativeDir + ";")) {
                 Os.setenv("ADSP_LIBRARY_PATH", nativeDir + ";" + searchPath, true);
             }
-            Log.i("AniartDepth", "QNN HTP probe begin | CPU fallback disabled");
+            backendPath = new File(nativeDir, "libQnnHtp.so").getAbsolutePath();
+        } catch (Exception error) {
+            Log.w("AniartDepth", "QNN HTP environment setup failed", error);
+            return "см. лог";
+        }
+
+        boolean direct = false;
+        try {
+            System.loadLibrary("hello_xr");
+            direct = runDirectHtp(backendPath);
+        } catch (RuntimeException | LinkageError error) {
+            Log.w("AniartDepth", "QNN direct probe failed", error);
+        }
+        Log.i("AniartDepth", "QNN direct " + (direct ? "PASS" : "FAIL"));
+
+        boolean auto = checkHtpGraph(backendPath, false);
+        boolean explicit = checkHtpGraph(backendPath, true);
+        return auto || explicit ? "OK" : "см. лог";
+    }
+
+    private boolean checkHtpGraph(String backendPath, boolean explicit) {
+        String label = explicit ? "QNN HTP XR2 Gen 2 (SoC 53, v69)" : "QNN HTP auto";
+        String stage = "prepare";
+        try (var options = new OrtSession.SessionOptions()) {
+            Log.i("AniartDepth", label + " probe begin | CPU fallback disabled");
             stage = "register QNN EP";
             options.addConfigEntry("session.disable_cpu_ep_fallback", "1");
-            options.addQnn(Map.of("backend_path", new File(nativeDir, "libQnnHtp.so").getAbsolutePath(),
+            var providerOptions = new HashMap<>(Map.of("backend_path", backendPath,
                     "offload_graph_io_quantization", "0"));
+            if (explicit) {
+                providerOptions.put("soc_model", "53");
+                providerOptions.put("htp_arch", "69");
+            }
+            options.addQnn(providerOptions);
             stage = "create HTP session";
             long start = System.nanoTime();
             var ort = OrtEnvironment.getEnvironment();
             try (var session = ort.createSession(modelAsset("qnn-htp-probe.onnx"), options)) {
-                Log.i("AniartDepth", "QNN HTP session initialized in " + (System.nanoTime() - start) / 1_000_000 + " ms");
+                Log.i("AniartDepth", label + " session initialized in " + (System.nanoTime() - start) / 1_000_000 + " ms");
                 stage = "execute and verify HTP output";
                 ByteBuffer pixels = ByteBuffer.allocateDirect(16);
                 for (int i = 0; i < 16; i++) pixels.put(i, (byte) (120 + i));
@@ -171,14 +202,14 @@ final class DepthModels {
                             int value = Byte.toUnsignedInt(values.get());
                             if (value != 112 + 2 * i) throw new IOException("Unexpected HTP output at " + i + ": " + value);
                         }
-                        Log.i("AniartDepth", "QNN HTP PASS | CPU fallback disabled | "
+                        Log.i("AniartDepth", label + " PASS | CPU fallback disabled | "
                                 + (System.nanoTime() - start) / 1_000_000 + " ms");
                     }
                 }
             }
             return true;
         } catch (Exception | LinkageError error) {
-            Log.w("AniartDepth", "QNN HTP FAIL at " + stage, error);
+            Log.w("AniartDepth", label + " FAIL at " + stage, error);
             return false;
         }
     }
