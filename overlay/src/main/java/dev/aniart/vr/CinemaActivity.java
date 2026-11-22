@@ -536,7 +536,9 @@ public final class CinemaActivity extends NativeActivity {
                 generation.incrementAndGet();
                 notice = "Limbo V3 готов";
             } catch (Exception error) {
-                notice = "Не удалось загрузить Limbo V3. Повторите или выберите файл";
+                notice = error instanceof java.net.SocketTimeoutException
+                        ? "GitHub не ответил вовремя. Повторите или выберите файл"
+                        : "Не удалось загрузить Limbo V3. Повторите или выберите файл";
                 Log.w("AniartDepth", "Download Limbo V3", error);
             } finally {
                 limboDownloading.set(false);

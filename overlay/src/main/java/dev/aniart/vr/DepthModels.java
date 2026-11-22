@@ -194,6 +194,9 @@ final class DepthModels {
                 }
                 return new Backend(ort, options, 504, 280, true, "image", file);
             }
+            // Extended optimizations fuse the encoder's FP16 graph into com.microsoft.Gelu.
+            // The ARM64 CPU provider in our Android build only has an FP32 kernel for that fusion.
+            options.setOptimizationLevel(OrtSession.SessionOptions.OptLevel.BASIC_OPT);
             return new VideoBackend(ort, options, modelAsset("encoder_fp16.onnx"),
                     modelAsset("bootstrap_fp16.onnx"), modelAsset("stream_fp16.onnx"));
         }
@@ -370,9 +373,12 @@ final class DepthModels {
         @Override int contentPadding() { return gpu ? 6 : 0; }
 
         @Override float[] infer(byte[] rgba) {
+            inputBuffer.clear();
             inputBuffer.asFloatBuffer().put(rgb(rgba, false));
-            outputBuffer.rewind();
+            outputBuffer.clear();
             interpreter.run(inputBuffer, outputBuffer);
+            // LiteRT may advance the destination to its end when it copies a tensor into it.
+            outputBuffer.clear();
             var packed = outputBuffer.asFloatBuffer();
             float[] depth = new float[width * (height - 2 * contentPadding())];
             if (!gpu) {
