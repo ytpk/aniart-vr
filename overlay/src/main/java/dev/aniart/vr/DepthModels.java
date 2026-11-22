@@ -51,7 +51,9 @@ final class DepthModels {
     private Backend backend;
     private int loaded, previousEpoch = -1;
     private float[] lastSignature;
-    private float low, high;
+    private float low, high, shotMedian;
+    private byte[] lastFrame;
+    private static final byte[] REUSED_FRAME = {2};
 
     DepthModels(Context context) { this.context = context; }
 
@@ -98,6 +100,13 @@ final class DepthModels {
                     loaded = model;
                 }
                 if (job != epoch) return;
+                if (job == previousEpoch && Arrays.equals(lastFrame, rgba)) {
+                    if (job == epoch && !closed) {
+                        result.set(new MapFrame(job, REUSED_FRAME));
+                        update(job, "Повтор кадра · карта сохранена");
+                    }
+                    return;
+                }
                 long started = System.nanoTime();
                 float[] signature = signature(rgba);
                 boolean reset = job != previousEpoch || isCut(lastSignature, signature);
@@ -117,9 +126,13 @@ final class DepthModels {
                     loaded = model;
                     values = backend.infer(rgba);
                 }
-                byte[] map = normalize(values, backend.width, backend.height - 2 * backend.contentPadding(), model == 2, reset);
+                byte[] map = normalize(values, backend.width, backend.height - 2 * backend.contentPadding(),
+                        model == 2, reset, model == 3);
+                lastFrame = rgba.clone();
+                byte[] packet = Arrays.copyOf(map, map.length + 1);
+                packet[map.length] = (byte) (reset ? 1 : 0);
                 if (job == epoch && !closed) {
-                    result.set(new MapFrame(job, map));
+                    result.set(new MapFrame(job, packet));
                     update(job, (isZipGpu() ? "GPU " : "CPU ")
                             + Math.round((System.nanoTime() - started) / 1_000_000.0) + " мс");
                 }
@@ -473,13 +486,13 @@ final class DepthModels {
         catch (Exception error) { Log.w("AniartDepth", "Close depth session", error); }
     }
 
-    private byte[] normalize(float[] values, int width, int height, boolean inverse, boolean reset) throws IOException {
+    private byte[] normalize(float[] values, int width, int height, boolean inverse, boolean reset, boolean sharedScale) throws IOException {
         if (values.length != width * height) throw new IOException("Unexpected depth map size " + values.length);
         float[] samples = new float[(values.length + 15) / 16];
         int count = 0;
         for (int i = 0; i < values.length; i++) {
             float d = values[i];
-            if (inverse && Float.isFinite(d) && d > 0) d = 1 / Math.max(d, .000001f);
+            if (inverse) d = Float.isFinite(d) && d > 0 ? 1 / Math.max(d, .000001f) : Float.NaN;
             values[i] = d;
             if (i % 16 == 0 && Float.isFinite(d)) samples[count++] = d;
         }
@@ -490,8 +503,18 @@ final class DepthModels {
         }
         Arrays.sort(samples, 0, count);
         float bottom = samples[(int) ((count - 1) * .02f)], top = samples[(int) ((count - 1) * .98f)];
-        low = reset ? bottom : .85f * low + .15f * bottom;
-        high = reset ? top : .85f * high + .15f * top;
+        float median = samples[count / 2];
+        if (reset || high - low <= .000001f) {
+            low = bottom;
+            high = top;
+            shotMedian = median;
+        } else {
+            low += .045f * (bottom - low);
+            high += .045f * (top - high);
+            shotMedian += .045f * (median - shotMedian);
+        }
+        float scale = sharedScale ? 1 : Math.min(1.7f, Math.max(.6f, (high - low) / Math.max(top - bottom, .000001f)));
+        float scaleMix = sharedScale ? 1 : .4f + .6f * scale;
         if (high - low <= .000001f) {
             Arrays.fill(map, (byte) 128);
             return map;
@@ -500,6 +523,7 @@ final class DepthModels {
             int sy = clamp((MAP_H - y - 1) * height / MAP_H, height);
             for (int x = 0; x < MAP_W; x++) {
                 float v = values[sy * width + x * width / MAP_W];
+                if (!sharedScale) v = median + (v - median) * scaleMix + .6f * (shotMedian - median);
                 map[y * MAP_W + x] = (byte) (Float.isFinite(v)
                         ? Math.round(255 * Math.max(0, Math.min(1, (v - low) / (high - low)))) : 128);
             }

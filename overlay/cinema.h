@@ -92,6 +92,17 @@ vec3 source(vec2 p) {
 float light(vec3 rgb) {
     return dot(rgb, vec3(0.2126, 0.7152, 0.0722));
 }
+vec3 suppressHalo(vec2 p) {
+    vec3 center = source(p);
+    float luma = light(center);
+    vec2 stepX = vec2(sourceTexel.x * 2.1, 0);
+    vec2 stepY = vec2(0, sourceTexel.y * 2.1);
+    float overX = luma - max(light(source(p - stepX)), light(source(p + stepX)));
+    float overY = luma - max(light(source(p - stepY)), light(source(p + stepY)));
+    float overshoot = max(overX, overY);
+    float edge = smoothstep(.018, .05, overshoot) * (1.0 - smoothstep(.10, .17, overshoot));
+    return max(vec3(0), center - vec3(.52 * max(0.0, overshoot) * edge));
+}
 vec3 picture(vec2 p, bool sharpened) {
     return sharpened ? texture(enhanced, p).rgb : source(p);
 }
@@ -122,6 +133,10 @@ vec3 finishPicture(vec2 p, bool sharpened) {
     return value;
 }
 void main() {
+    if (operation == 5) {
+        color = vec4(suppressHalo(uv), 1);
+        return;
+    }
     if (operation == 4) {
         vec3 sum = vec3(0.0);
         for (int y=0;y<4;++y) for (int x=0;x<4;++x) {
@@ -172,11 +187,12 @@ void main() {
     GLsync readbackFence = nullptr;
     bool hasPriorDepth = false;
     float depthBlend = 1, depthStrength = 1, targetDepthStrength = 1;
-    std::chrono::steady_clock::time_point submittedDepth{}, deliveredDepth{}, lastMovieFrame{};
+    std::chrono::steady_clock::time_point submittedDepth{}, deliveredDepth{}, freshDepth{}, lastMovieFrame{};
     GLuint depthCapture = 0, screenLight = 0, msaaDepth = 0;
     int msaaWidth = 0, msaaHeight = 0;
     PFNGLFRAMEBUFFERTEXTURE2DMULTISAMPLEEXTPROC bindMultisample = nullptr;
     PFNGLRENDERBUFFERSTORAGEMULTISAMPLEEXTPROC storageMultisample = nullptr;
+    bool filteredDehalo = false;
     bool canMsaa = false, lightReady = false, panelMipsDirty = true;
     std::chrono::steady_clock::time_point lastLight{}, lastAim{};
     Pointer previousAim;
@@ -326,7 +342,7 @@ void main() {
                 canFilter = false;
                 break;
             }
-            UseVideo(identity, layout, view, 0, 0);
+            UseVideo(identity, layout, view, (config & (1 << 23)) ? 5 : 0, 0);
             glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
             for (int i = 0; i < 5; ++i) {
                 const int scale = i == 4 ? 2 : 1;
@@ -615,7 +631,7 @@ public:
         if (depthModel != newModel || format < 0) {
             depthModel = newModel;
             depthReady = false;
-            lastDepth = submittedDepth = deliveredDepth = {};
+            lastDepth = submittedDepth = deliveredDepth = freshDepth = {};
             hasPriorDepth = false;
             depthBlend = 1;
             targetDepthStrength = depthStrength = depthModel == 0 ? 1 : 0;
@@ -631,16 +647,21 @@ public:
         const bool supported = hasFrame && w <= 1920 && h <= 1080 &&
                                (!stereo || w * h <= 1280 * 720);
         const bool enhance = fast && canFilter && supported &&
-                             (!filtered || filteredLayout != layout || newFrame);
+                             (!filtered || filteredLayout != layout || filteredDehalo != bool(config & (1 << 23)) || newFrame);
         const bool mapDepth = parallax && depthModel == 0 && hasFrame && (newFrame || !depthReady);
         bool captureDepth = false;
         if (depthModel != 0 && hasFrame) {
             auto map = static_cast<jbyteArray>(env->CallObjectMethod(activity, takeDepth));
             if (map) {
-                if (env->GetArrayLength(map) == depthValues.size()) {
-                    hasPriorDepth = depthReady;
+                const jsize size = env->GetArrayLength(map);
+                if (size == 1 && depthReady) {
+                    freshDepth = now;
+                } else if (size == depthValues.size() + 1) {
+                    jbyte cut = 0;
+                    env->GetByteArrayRegion(map, depthValues.size(), 1, &cut);
+                    hasPriorDepth = depthReady && !cut;
                     if (hasPriorDepth) std::swap(priorDepth, depth);
-                    deliveredDepth = now;
+                    deliveredDepth = freshDepth = now;
                     const float age = std::chrono::duration<float>(now - submittedDepth).count();
                     targetDepthStrength = std::clamp((.70f - age) / .48f, 0.f, 1.f);
                     env->GetByteArrayRegion(map, 0, depthValues.size(), depthValues.data());
@@ -655,7 +676,8 @@ public:
                 const float fade = std::chrono::duration<float>(now - deliveredDepth).count();
                 depthBlend = hasPriorDepth ? std::clamp(fade / .115f, 0.f, 1.f) : 1.f;
                 const bool advancing = now - lastMovieFrame < std::chrono::milliseconds(250);
-                const float speed = targetDepthStrength * (advancing ? std::clamp((1.1f - fade) / .5f, 0.f, 1.f) : 1.f);
+                const float age = std::chrono::duration<float>(now - freshDepth).count();
+                const float speed = targetDepthStrength * (advancing ? std::clamp((1.1f - age) / .5f, 0.f, 1.f) : 1.f);
                 depthStrength += (speed - depthStrength) * .10f;
             }
             if (readbackFence) {
@@ -692,6 +714,7 @@ public:
                 (newFrame && now - lastLight >= std::chrono::milliseconds(67)));
         if (updateLight) lastLight = now;
         if (enhance || mapDepth || captureDepth || updateLight) Process(enhance, mapDepth, captureDepth, updateLight);
+        if (enhance) filteredDehalo = (config & (1 << 23)) != 0;
         if (measure) {
             endQuery(GL_TIME_ELAPSED_EXT);
             queryPending = true;

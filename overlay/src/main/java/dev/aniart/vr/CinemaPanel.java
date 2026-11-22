@@ -56,7 +56,7 @@ final class CinemaPanel {
     private int stereo, depth, screenSize;
     private int depthModel;
     private String depthStatus = "";
-    private boolean antialias, deband, darkRoom, smoothLaser, prefer90;
+    private boolean antialias, deband, dehalo, darkRoom, smoothLaser, prefer90;
     private boolean eyeMsaa;
     private float displayHz;
     private boolean fast, comparison, reverse, autoNext, roomSound;
@@ -75,6 +75,7 @@ final class CinemaPanel {
         this.preferences = preferences;
         antialias = preferences.getBoolean("antialias", true);
         deband = preferences.getBoolean("deband", true);
+        dehalo = preferences.getBoolean("dehalo", false);
         darkRoom = preferences.getBoolean("dark_room", true);
         smoothLaser = preferences.getBoolean("smooth_laser", true);
         prefer90 = preferences.getBoolean("prefer_90_hz", true);
@@ -130,7 +131,7 @@ final class CinemaPanel {
         return page | (fast ? 8 : 0) | (comparison ? 16 : 0) | (stereo << 5)
                 | (reverse ? 256 : 0) | (depth << 9) | (screenSize << 13) | (roomSound ? 1 << 15 : 0)
                 | (depthModel << 16) | (antialias ? 1 << 18 : 0) | (deband ? 1 << 19 : 0)
-                | (darkRoom ? 1 << 20 : 0) | (prefer90 ? 1 << 21 : 0) | (smoothLaser ? 1 << 22 : 0);
+                | (darkRoom ? 1 << 20 : 0) | (prefer90 ? 1 << 21 : 0) | (smoothLaser ? 1 << 22 : 0) | (dehalo ? 1 << 23 : 0);
     }
 
     private void changeStereo(int mode) {
@@ -148,7 +149,7 @@ final class CinemaPanel {
     private void settingsChanged() {
         preferences.edit().putBoolean("anime4k", fast).putBoolean("comparison", comparison)
                 .putBoolean("reverse_eyes", reverse).putBoolean("auto_next", autoNext)
-                .putBoolean("antialias", antialias).putBoolean("deband", deband).putBoolean("dark_room", darkRoom)
+                .putBoolean("antialias", antialias).putBoolean("deband", deband).putBoolean("dehalo", dehalo).putBoolean("dark_room", darkRoom)
                 .putBoolean("prefer_90_hz", prefer90).putBoolean("smooth_laser", smoothLaser)
                 .putInt("depth", depth).putInt("depth_model", depthModel).putInt("screen_size", screenSize).apply();
         dirty = true;
@@ -600,6 +601,10 @@ final class CinemaPanel {
             settingsChanged();
         });
         text("Стерео", 32, 291, 36, INK, 600, true);
+        button(dehalo ? "Dehalo: вкл." : "Dehalo: выкл.", 918, 246, 330, 52, dehalo, () -> {
+            dehalo = !dehalo;
+            settingsChanged();
+        });
         String[] options = {"2D", "SBS · рядом", "OU · сверху/снизу", "2D → 3D"};
         for (int i = 0; i < options.length; i++) {
             int value = i;
