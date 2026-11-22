@@ -36,7 +36,7 @@ final class CinemaPanel {
     record Target(RectF rect, Click click) {}
 
     private final CinemaActivity activity;
-    private final AnixartBrowser anixart;
+    private final AniCliBrowser anicli;
     private boolean remote;
     private final SharedPreferences preferences;
     private final TextPaint paint = new TextPaint(Paint.ANTI_ALIAS_FLAG);
@@ -65,8 +65,8 @@ final class CinemaPanel {
 
     CinemaPanel(CinemaActivity activity, SharedPreferences preferences) {
         this.activity = activity;
-        this.anixart = new AnixartBrowser(activity, this::playEpisode);
-        remote = preferences.getBoolean("anixart_tab", true);
+        this.anicli = new AniCliBrowser(activity, this::playOnline);
+        remote = preferences.getBoolean("anicli_tab", true);
         this.preferences = preferences;
         fast = preferences.getBoolean("anime4k", false);
         comparison = preferences.getBoolean("comparison", false);
@@ -77,10 +77,10 @@ final class CinemaPanel {
         roomSound = preferences.getBoolean("room_sound", false);
     }
 
-    void shutdown() { anixart.shutdown(); }
+    void shutdown() { anicli.shutdown(); }
 
     int renderConfig() {
-        if (anixart.pump()) dirty = true;
+        if (anicli.pump()) dirty = true;
         var shared = activity.sharedEpisode();
         if (shared != lastShared) {
             lastShared = shared;
@@ -95,7 +95,7 @@ final class CinemaPanel {
                 dirty = true;
             }
         }
-        if (remote && page == LIBRARY) anixart.start();
+        if (remote && page == LIBRARY) anicli.start();
         var state = activity.snapshot();
         if (state.episode() != currentEpisode) {
             currentEpisode = state.episode();
@@ -152,7 +152,7 @@ final class CinemaPanel {
             dirty = true;
         } else if (page == SETTINGS) {
             show(WATCH);
-        } else if (remote && page == LIBRARY && anixart.back()) {
+        } else if (remote && page == LIBRARY && anicli.back()) {
             dirty = true;
         } else if (details != null && page == LIBRARY) {
             details = null;
@@ -176,10 +176,10 @@ final class CinemaPanel {
                 if (page != LIBRARY || keyboard) return;
                 int step = command == 5 ? -1 : 1;
                 if (remote) {
-                    var screen = anixart.screen();
-                    if (screen == null || screen.loading) return;
-                    int count = screen.kind == AnixartBrowser.Kind.TITLES ? screen.titles.size() : screen.rows.size();
-                    int size = screen.kind == AnixartBrowser.Kind.TITLES ? PAGE_SIZE : DETAIL_SIZE;
+                    var screen = anicli.screen();
+                    if (screen == null || screen.kind == AniCliBrowser.Kind.PROVIDERS) return;
+                    int count = screen.kind == AniCliBrowser.Kind.TITLES ? screen.titles.size() : screen.rows.size();
+                    int size = screen.kind == AniCliBrowser.Kind.TITLES ? PAGE_SIZE : DETAIL_SIZE;
                     screen.page = pageIndex(screen.page + step, count, size);
                 } else if (details == null) {
                     libraryPage = pageIndex(libraryPage + step, visibleSeries().size(), PAGE_SIZE);
@@ -275,7 +275,7 @@ final class CinemaPanel {
 
     private void header(CinemaActivity.Snapshot state) {
         box(0, 0, WIDTH, 96, 0, 0xff191e2f);
-        button("Anixart", 32, 22, 176, 53, page == LIBRARY && remote, () -> switchCatalog(true));
+        button("ani-cli", 32, 22, 176, 53, page == LIBRARY && remote, () -> switchCatalog(true));
         button("Локальное", 224, 22, 202, 53, page == LIBRARY && !remote, () -> switchCatalog(false));
         if (state.episode() != null) button("Плеер", 551, 22, 190, 53, false, () -> show(WATCH));
         button("Настройки", 757, 22, 215, 53, page == SETTINGS, () -> show(SETTINGS));
@@ -285,7 +285,7 @@ final class CinemaPanel {
     private void switchCatalog(boolean useRemote) {
         if (remote != useRemote) search = "";
         remote = useRemote;
-        preferences.edit().putBoolean("anixart_tab", remote).apply();
+        preferences.edit().putBoolean("anicli_tab", remote).apply();
         details = null;
         keyboard = false;
         show(LIBRARY);
@@ -297,12 +297,19 @@ final class CinemaPanel {
         lastUse = SystemClock.uptimeMillis();
     }
 
+    private void playOnline(CinemaActivity.OnlineEpisode selection) {
+        activity.openOnline(selection);
+        page = WATCH;
+        lastUse = SystemClock.uptimeMillis();
+    }
+
     private void remoteCatalog(String notice) {
-        var screen = anixart.screen();
+        var screen = anicli.screen();
         if (screen == null) return;
-        if (screen.kind == AnixartBrowser.Kind.TITLES) {
-            text(screen.title, 32, 160, 42, INK, 520, true);
-            button(screen.subtitle.isEmpty() ? "Поиск Anixart" : "Поиск  ·  " + screen.subtitle,
+        if (screen.kind == AniCliBrowser.Kind.TITLES) {
+            button("‹  Источники", 32, 113, 206, 61, false, anicli::back);
+            text(screen.title, 257, 155, 33, INK, 307, true);
+            button(screen.subtitle.isEmpty() ? "Поиск  ·  " + screen.title : "Поиск  ·  " + screen.subtitle,
                     580, 113, 668, 61, false, () -> { search = screen.subtitle; keyboard = true; });
             screen.page = pageIndex(screen.page, screen.titles.size(), PAGE_SIZE);
             int start = screen.page * PAGE_SIZE;
@@ -311,36 +318,47 @@ final class CinemaPanel {
                 remoteCard(screen.titles.get(i), 32 + (cell % 4) * 308, 196 + (cell / 4) * 233);
             }
             pageButtons(screen.page, screen.titles.size(), PAGE_SIZE, 32, 689, 445, value -> screen.page = value);
-            if (screen.remotePage > 0) button("‹  Выдача", 505, 689, 150, 52, false,
-                    () -> anixart.openTitlePage(screen.remotePage - 1));
-            if (screen.more) button("Ещё тайтлы  ›", 670, 689, 194, 52, false,
-                    () -> anixart.openTitlePage(screen.remotePage + 1));
-            if (!screen.status.isEmpty()) text(screen.status, 32, 270, 30, MUTED, 920, false);
+            if (!screen.status.isEmpty()) {
+                float x = screen.titles.isEmpty() ? 32 : 505;
+                float y = screen.titles.isEmpty() ? 270 : 721;
+                text(screen.status, x, y, 25, MUTED, 735, false);
+            }
             if (screen.retry != null) button("Повторить", 32, 302, 266, 62, true, screen.retry);
         } else {
-            button("‹  Назад", 32, 115, 168, 56, false, () -> anixart.back());
-            text(screen.title, 224, 156, 39, INK, 1024, true);
+            if (screen.kind == AniCliBrowser.Kind.PROVIDERS) {
+                text(screen.title, 32, 157, 39, INK, 520, true);
+                button("Поиск по всем источникам", 580, 113, 668, 61, false, () -> {
+                    search = "";
+                    keyboard = true;
+                });
+            } else {
+                button("‹  Назад", 32, 115, 168, 56, false, anicli::back);
+                text(screen.title, 224, 156, 39, INK, 1024, true);
+            }
             text(screen.subtitle, 32, 226, 27, MUTED, 1216, false);
-            screen.page = pageIndex(screen.page, screen.rows.size(), DETAIL_SIZE);
+            boolean sources = screen.kind == AniCliBrowser.Kind.PROVIDERS;
+            screen.page = sources ? 0 : pageIndex(screen.page, screen.rows.size(), DETAIL_SIZE);
             int start = screen.page * DETAIL_SIZE;
+            int end = sources ? screen.rows.size() : Math.min(start + DETAIL_SIZE, screen.rows.size());
             if (!screen.loading && screen.retry == null) {
-                for (int i = start; i < Math.min(start + DETAIL_SIZE, screen.rows.size()); i++) {
+                for (int i = start; i < end; i++) {
                     var row = screen.rows.get(i);
-                    button(row.label(), 32, 246 + (i - start) * 82, 892, 65, false, row.open());
+                    if (sources) button(row.label(), 32 + (i % 2) * 616, 246 + (i / 2) * 82, 600, 65, false, row.open());
+                    else button(row.label(), 32, 246 + (i - start) * 82, 1216, 65, false, row.open());
                 }
             }
             if (screen.retry != null) button("Повторить", 32, 246, 266, 62, true, screen.retry);
-            pageButtons(screen.page, screen.rows.size(), DETAIL_SIZE, 32, 689, 445, value -> screen.page = value);
+            if (!sources) pageButtons(screen.page, screen.rows.size(), DETAIL_SIZE, 32, 689, 445, value -> screen.page = value);
             if (!screen.status.isEmpty()) text(screen.status, 32, screen.rows.isEmpty() && screen.retry == null ? 298 : 670, 24, MUTED, 1160, false);
         }
-        if (!notice.isEmpty()) text(notice, 882, 723, 17, MUTED, 366, false);
+        if (!notice.isEmpty()) text(notice, 882, 746, 17, MUTED, 366, false);
     }
 
-    private void remoteCard(AnixartCatalog.Title title, float x, float y) {
+    private void remoteCard(AniCliBrowser.Title title, float x, float y) {
         boolean focus = hovered == buttons.size();
         box(x, y, 292, 217, 14, focus ? FOCUS : TILE);
         box(x + 9, y + 8, 100, 149, 10, 0xff3a345b);
-        Bitmap poster = anixart.poster(title.poster());
+        Bitmap poster = anicli.poster(title.poster());
         if (poster != null) {
             bounds.set(x + 9, y + 8, x + 109, y + 157);
             paint.setFilterBitmap(true);
@@ -350,11 +368,9 @@ final class CinemaPanel {
             text(new String(initials, 0, initials.length).toUpperCase(Locale.ROOT),
                     x + 19, y + 94, 35, ACCENT, 84, true);
         }
-        text(title.year(), x + 123, y + 56, 23, ACCENT, 155, true);
-        if (title.episodes() > 0) text("Серий: " + title.episodes(), x + 123, y + 90, 19, MUTED, 155, false);
-        if (title.blocked()) text("Ограничено", x + 123, y + 126, 17, MUTED, 155, false);
+        text(title.provider().name(), x + 123, y + 56, 23, ACCENT, 155, true);
         text(title.name(), x + 12, y + 194, 23, INK, 268, true);
-        buttons.add(new Target(new RectF(x, y, x + 292, y + 217), ignored -> anixart.select(title)));
+        buttons.add(new Target(new RectF(x, y, x + 292, y + 217), ignored -> anicli.select(title)));
     }
 
     private List<Catalog.Series> visibleSeries() {
@@ -492,7 +508,7 @@ final class CinemaPanel {
         });
         button(remote ? "Искать" : "Показать (" + visibleSeries().size() + ")", 971, 609, 277, 77, true, () -> {
             keyboard = false;
-            if (remote) anixart.search(search);
+            if (remote) anicli.search(search);
         });
     }
 

@@ -1,5 +1,6 @@
 plugins {
     id 'com.android.application' version '8.1.4'
+    id 'com.chaquo.python' version '16.1.0'
 }
 android {
     namespace 'dev.aniart.vr'
@@ -14,8 +15,8 @@ android {
         applicationId 'dev.aniart.vr'
         minSdk 31
         targetSdk 34
-        versionCode 8
-        versionName '0.4.2'
+        versionCode 9
+        versionName '0.5.0'
         ndk { abiFilters 'arm64-v8a' }
         externalNativeBuild {
             cmake {
@@ -34,7 +35,18 @@ android {
         }
     }
 }
+chaquopy {
+    defaultConfig {
+        version = '3.12'
+        buildPython 'python3.12'
+        pip {
+            options '--no-deps'
+            install '-r', 'anicli-requirements.txt'
+        }
+    }
+}
 dependencies {
     implementation 'androidx.media3:media3-exoplayer:1.4.1'
     implementation 'androidx.media3:media3-exoplayer-hls:1.4.1'
+    implementation 'androidx.media3:media3-exoplayer-dash:1.4.1'
 }

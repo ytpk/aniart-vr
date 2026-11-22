@@ -16,7 +16,6 @@ import android.view.Surface;
 import androidx.media3.common.AudioAttributes;
 import androidx.media3.common.C;
 import androidx.media3.common.MediaItem;
-import androidx.media3.common.MimeTypes;
 import androidx.media3.common.PlaybackException;
 import androidx.media3.common.Player;
 import androidx.media3.common.VideoSize;
@@ -34,6 +33,9 @@ import java.io.File;
 import java.io.FileOutputStream;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.Callable;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -45,6 +47,9 @@ public final class CinemaActivity extends NativeActivity {
     private volatile List<Catalog.Series> catalog = List.of();
     private List<Catalog.Episode> demos = List.of();
     private volatile Catalog.Episode sharedEpisode;
+    private volatile OnlineEpisode onlineEpisode;
+    private OnlineEpisode loadingNext;
+    private final ExecutorService onlinePlayback = Executors.newSingleThreadExecutor();
     private volatile String notice = "";
     private volatile Snapshot snapshot = new Snapshot(null, "Выберите видео", 0, 0, false, false, 1f, 1f);
     private volatile long format;
@@ -69,6 +74,7 @@ public final class CinemaActivity extends NativeActivity {
 
     record Snapshot(Catalog.Episode episode, String status, long position, long duration,
                     boolean playing, boolean seekable, float volume, float speed) {}
+    record OnlineEpisode(Catalog.Episode episode, Callable<OnlineEpisode> next) {}
 
     private final Runnable tick = new Runnable() {
         private int saves;
@@ -134,7 +140,7 @@ public final class CinemaActivity extends NativeActivity {
         var link = IncomingVideo.parse(value, headers);
         if (link == null) {
             notice = value != null && value.length() <= 8192 && KodikStreams.isEmbed(value.trim())
-                    ? "Это страница Kodik. Скопируйте полный URL потока в Anixart"
+                    ? "Это страница Kodik. Откройте серию через каталог ani-cli или вставьте ссылку на поток"
                     : "Нужна прямая HTTPS-ссылка на .m3u8 или .mp4";
             return;
         }
@@ -177,19 +183,8 @@ public final class CinemaActivity extends NativeActivity {
     @Override protected void onDestroy() {
         super.onDestroy();
         panel.shutdown();
-    }
-
-    void openEmbedded(String url) {
-        ui.post(() -> {
-            try {
-                Intent view = new Intent(Intent.ACTION_VIEW, Uri.parse(url));
-                view.addCategory(Intent.CATEGORY_BROWSABLE);
-                startActivity(view);
-                notice = "";
-            } catch (android.content.ActivityNotFoundException error) {
-                notice = "На устройстве нет приложения для открытия веб-плеера";
-            }
-        });
+        onlineEpisode = null;
+        onlinePlayback.shutdownNow();
     }
 
     List<Catalog.Series> catalog() { return catalog; }
@@ -257,7 +252,19 @@ public final class CinemaActivity extends NativeActivity {
         panel.upload(x, y, filterStatus, width, height, depthReady, fps, gpuMs);
     }
 
-    void open(Catalog.Episode episode) { ui.post(() -> play(episode, true)); }
+    void open(Catalog.Episode episode) {
+        ui.post(() -> {
+            onlineEpisode = null;
+            play(episode, true);
+        });
+    }
+    void openOnline(OnlineEpisode selection) {
+        ui.post(() -> playOnline(selection));
+    }
+    private void playOnline(OnlineEpisode selection) {
+        onlineEpisode = selection;
+        play(selection.episode(), true);
+    }
     void toggle() { ui.post(this::togglePlayback); }
     void step(long delta) {
         ui.post(() -> {
@@ -270,9 +277,40 @@ public final class CinemaActivity extends NativeActivity {
         });
     }
     void next(Catalog.Episode current) {
-        ui.post(() -> {
+        ui.post(() -> advance(current));
+    }
+
+    private void advance(Catalog.Episode current) {
+        if (current == null || playing != current) return;
+        OnlineEpisode selection = onlineEpisode;
+        if (selection == null || !selection.episode().equals(current)) {
             Catalog.Episode next = nextAfter(current);
             if (next != null) play(next, true);
+            return;
+        }
+        if (selection.next() == null || loadingNext == selection) return;
+        loadingNext = selection;
+        status = "Загрузка следующей серии…";
+        publish();
+        onlinePlayback.execute(() -> {
+            OnlineEpisode result = null;
+            String failure = "Следующая серия недоступна в этой озвучке";
+            try {
+                result = selection.next().call();
+            } catch (Exception error) {
+                failure = AniCliBrowser.errorStatus(error);
+            }
+            OnlineEpisode resolved = result;
+            String message = failure;
+            ui.post(() -> {
+                if (loadingNext == selection) loadingNext = null;
+                if (onlineEpisode != selection || playing != current) return;
+                if (resolved != null) playOnline(resolved);
+                else {
+                    status = message;
+                    publish();
+                }
+            });
         });
     }
     void setAutoNext(boolean enabled) { ui.post(() -> autoNext = enabled); }
@@ -293,7 +331,11 @@ public final class CinemaActivity extends NativeActivity {
         });
     }
 
-    boolean canPlayNext(Catalog.Episode current) { return nextAfter(current) != null; }
+    boolean canPlayNext(Catalog.Episode current) {
+        OnlineEpisode selection = onlineEpisode;
+        return selection != null && selection.episode().equals(current)
+                ? selection.next() != null : nextAfter(current) != null;
+    }
 
     private Catalog.Episode nextAfter(Catalog.Episode current) {
         if (current == null) return null;
@@ -412,9 +454,8 @@ public final class CinemaActivity extends NativeActivity {
                     default -> "Загрузка";
                 };
                 if (state == Player.STATE_ENDED && autoNext && foreground) {
-                    Catalog.Episode next = nextAfter(episode);
-                    if (next != null) ui.post(() -> {
-                        if (active == player && active.getPlaybackState() == Player.STATE_ENDED) play(next, true);
+                    ui.post(() -> {
+                        if (active == player && active.getPlaybackState() == Player.STATE_ENDED) advance(episode);
                     });
                 }
             }
@@ -438,8 +479,7 @@ public final class CinemaActivity extends NativeActivity {
                 Log.i("AniartVR", "Video decoder " + name);
             }
         });
-        MediaItem item = new MediaItem.Builder().setUri(episode.url())
-                .setMimeType(episode.hls() ? MimeTypes.APPLICATION_M3U8 : MimeTypes.VIDEO_MP4).build();
+        MediaItem item = new MediaItem.Builder().setUri(episode.url()).setMimeType(episode.mimeType()).build();
         active.setMediaItem(item, position > 0 ? position : C.TIME_UNSET);
         active.prepare();
         active.setPlayWhenReady(foreground && autoPlay);

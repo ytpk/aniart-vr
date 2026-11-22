@@ -1,3 +1,4 @@
 .build/
 catalog.local.json
 *.apk
+__pycache__/

@@ -15,6 +15,13 @@ jobs:
         with:
           distribution: temurin
           java-version: '17'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Test bundled ani-cli providers
+        run: |
+          python3.12 -m pip install --no-deps -r overlay/anicli-requirements.txt
+          PYTHONPATH=overlay/src/main/python python3.12 tools/tests/check_anicli.py
       - name: Test Anixart playback routes
         run: ./tools/check_anixart.sh
       - name: Install Android tools
@@ -37,6 +44,8 @@ jobs:
           "$ANDROID_HOME/build-tools/34.0.0/apksigner" verify "$apk"
           unzip -Z1 "$apk" | grep -qx 'lib/arm64-v8a/libhello_xr.so'
           unzip -Z1 "$apk" | grep -qx 'lib/arm64-v8a/libopenxr_loader.so'
+          unzip -Z1 "$apk" | grep -qx 'lib/arm64-v8a/libpython3.12.so'
+          unzip -Z1 "$apk" | grep -qx 'assets/chaquopy/requirements-arm64-v8a.imy'
       - uses: actions/upload-artifact@v4
         with:
           name: Aniart-VR-Quest-debug

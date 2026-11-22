@@ -2,6 +2,7 @@ package dev.aniart.vr;
 
 import android.content.Context;
 import android.net.Uri;
+import androidx.media3.common.MimeTypes;
 import org.json.JSONArray;
 import org.json.JSONObject;
 import java.io.ByteArrayOutputStream;
@@ -17,8 +18,17 @@ import java.util.Map;
 
 interface Catalog {
     record Episode(String title, String episode, String voice, String quality,
-                   Uri url, boolean hls, Map<String, String> headers, int stereo) {
-        String key() { return title + "\n" + episode + "\n" + voice + "\n" + quality; }
+                   Uri url, String mimeType, Map<String, String> headers, int stereo, String origin) {
+        Episode(String title, String episode, String voice, String quality, Uri url, boolean hls,
+                Map<String, String> headers, int stereo) {
+            this(title, episode, voice, quality, url, hls ? MimeTypes.APPLICATION_M3U8 : MimeTypes.VIDEO_MP4,
+                    headers, stereo, "");
+        }
+
+        String key() {
+            String prefix = origin.isEmpty() ? "" : origin + "\n";
+            return prefix + title + "\n" + episode + "\n" + voice + "\n" + quality;
+        }
         String variant() {
             return (voice.isEmpty() ? "Оригинал" : voice) + (quality.isEmpty() ? "" : "  ·  " + quality);
         }
