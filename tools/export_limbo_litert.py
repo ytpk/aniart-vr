@@ -29,6 +29,25 @@ if required:
     raise ValueError(f"Limbo checkpoint is missing inference weights: {required[:12]}")'''
 if source.count(original) != 1:
     raise ValueError("Pinned DA3 converter has an unexpected checkpoint loader")
+# Preserve the trained backbone's actual positional interpolation. Its offset
+# and antialias settings are part of the original forward pass.
+start = source.index("GH, GW =")
+end = source.index("# ---- SELECT_V2 fix", start)
+source = source[:start] + """
+for mod in net.modules():
+    if hasattr(mod, "interpolate_pos_encoding") and hasattr(mod, "pos_embed"):
+        with torch.no_grad():
+            tokens = torch.empty(1, H_IN // 14 * (W_IN // 14) + 1, mod.pos_embed.shape[-1])
+            baked = mod.interpolate_pos_encoding(tokens, H_IN, W_IN)
+        mod.register_buffer("_baked_pos", baked)
+        mod.interpolate_pos_encoding = _ty.MethodType(lambda self, x, w, h: self._baked_pos, mod)
+""" + source[end:]
+start = source.index("# ---- DPT head:")
+end = source.index("with torch.no_grad():\n    d_clean", start)
+source = source[:start] + """
+from limbo_litert_rewrites import freeze_decoder
+freeze_decoder(m, x_img)
+""" + source[end:]
 sys.argv = ["convert_da3.py", "frame.png", "280", "504"]
 exec(compile(source.replace(original, replacement), "convert_da3.py", "exec"), namespace := {})
 

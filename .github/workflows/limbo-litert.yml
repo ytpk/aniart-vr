@@ -4,6 +4,7 @@ on:
     branches: [main]
     paths:
       - 'tools/export_limbo_litert.*'
+      - 'tools/limbo_litert_rewrites.py'
       - 'overlay/**'
       - 'build.sh'
       - '.github/workflows/android.yml'
