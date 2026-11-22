@@ -137,15 +137,52 @@ final class AnixartBrowser {
         });
     }
 
+    private record Playback(AnixartCatalog.Link link, List<KodikStreams.Stream> streams, String status) {}
+
     private void episodeLink(AnixartCatalog.Title title, AnixartCatalog.Option voice,
                              AnixartCatalog.Option source, AnixartCatalog.Episode episode) {
         Screen next = push(title.name(), episode.name() + "  ·  " + voice.name() + "  ·  " + source.name());
-        load(next, () -> api.resolve(title, source, episode), link -> {
-            next.rows = link.embedded()
-                    ? List.of(new Row("Открыть веб-плеер " + source.name(), () -> openEmbedded(next, title, source, episode)))
-                    : List.of(new Row("Смотреть в VR", () -> play.accept(new Catalog.Episode(title.name(), episode.name(),
-                            voice.name(), source.name(), Uri.parse(link.url()), link.hls(), Map.of(), 0))));
-            next.status = link.embedded() ? "Источник предоставляет веб-плеер" : "";
+        loadEpisode(next, title, voice, source, episode);
+    }
+
+    private void loadEpisode(Screen next, AnixartCatalog.Title title, AnixartCatalog.Option voice,
+                             AnixartCatalog.Option source, AnixartCatalog.Episode episode) {
+        load(next, () -> {
+            var link = api.resolve(title, source, episode);
+            if (!link.embedded()) return new Playback(link, List.of(), "");
+            if (!KodikStreams.isEmbed(link.url())) return new Playback(link, List.of(), "Источник предоставляет веб-плеер");
+            try {
+                return new Playback(link, new KodikStreams().resolve(link.url()), "");
+            } catch (java.io.IOException error) {
+                String message = error.getMessage();
+                return new Playback(link, List.of(), message != null && message.startsWith("Kodik")
+                        ? message : "Не удалось получить поток Kodik");
+            } catch (Exception error) {
+                return new Playback(link, List.of(), "Не удалось прочитать потоки Kodik");
+            }
+        }, result -> {
+            var link = result.link();
+            if (!link.embedded()) {
+                next.rows = List.of(new Row("Смотреть в VR", () -> play.accept(new Catalog.Episode(title.name(),
+                        episode.name(), voice.name(), source.name(), Uri.parse(link.url()), link.hls(),
+                        KodikStreams.headersForCdn(link.url()), 0))));
+                return;
+            }
+
+            var rows = new java.util.ArrayList<Row>();
+            for (var stream : result.streams()) {
+                String quality = stream.height() + "p";
+                rows.add(new Row("Смотреть в VR  ·  " + quality, () -> play.accept(new Catalog.Episode(
+                        title.name(), episode.name(), voice.name(), quality, Uri.parse(stream.url()),
+                        stream.hls(), stream.headers(), 0))));
+            }
+            if (KodikStreams.isEmbed(link.url())) {
+                rows.add(new Row("Обновить потоки Kodik", () -> loadEpisode(next, title, voice, source, episode)));
+            }
+            rows.add(new Row("Открыть веб-плеер " + source.name(), () -> openEmbedded(next, title, source, episode)));
+            next.rows = List.copyOf(rows);
+            next.page = 0;
+            next.status = result.status();
         });
     }
 

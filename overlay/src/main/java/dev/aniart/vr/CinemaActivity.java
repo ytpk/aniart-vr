@@ -28,7 +28,6 @@ import java.io.FileOutputStream;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
-import java.util.Map;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -125,7 +124,7 @@ public final class CinemaActivity extends NativeActivity {
                 boolean hls = lower.endsWith(".m3u8");
                 if (hls || lower.endsWith(".mp4")) {
                     sharedEpisode = new Catalog.Episode("Открытая ссылка", uri.getHost(), "Оригинал",
-                            hls ? "HLS" : "MP4", uri, hls, Map.of(), 0);
+                            hls ? "HLS" : "MP4", uri, hls, KodikStreams.headersForCdn(raw), 0);
                     return;
                 }
             }
@@ -373,6 +372,12 @@ public final class CinemaActivity extends NativeActivity {
             @Override public void onPlayerError(PlaybackException error) {
                 if (active != player) return;
                 status = "Ошибка воспроизведения";
+                for (Throwable cause = error.getCause(); cause != null; cause = cause.getCause()) {
+                    if (cause instanceof androidx.media3.datasource.HttpDataSource.InvalidResponseCodeException http) {
+                        status += " · HTTP " + http.responseCode;
+                        break;
+                    }
+                }
                 Log.w("AniartVR", error.getErrorCodeName());
                 publish();
             }
