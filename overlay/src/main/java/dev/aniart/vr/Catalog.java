@@ -70,7 +70,8 @@ interface Catalog {
             for (int i = 0; i < entries.length(); i++) {
                 JSONObject entry = entries.getJSONObject(i);
                 Uri url = Uri.parse(entry.getString("url"));
-                boolean demo = bundled && url.toString().equals("asset:///stereo-demo.mp4");
+                boolean demo = bundled && (url.toString().equals("asset:///stereo-demo.mp4")
+                        || url.toString().equals("asset:///room-demo.mp4"));
                 if (!demo && (!"https".equals(url.getScheme()) || url.getHost() == null)) {
                     throw new IllegalArgumentException("Укажите HTTPS-адрес потока");
                 }

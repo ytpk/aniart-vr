@@ -9,6 +9,14 @@
     "stereo": "sbs"
   },
   {
+    "title": "Проверка звука 7.1",
+    "episode": "Демо звука · офлайн",
+    "voice": "Тест колонок",
+    "quality": "AAC 7.1",
+    "url": "asset:///room-demo.mp4",
+    "type": "mp4"
+  },
+  {
     "title": "Big Buck Bunny",
     "episode": "Демо • HLS 720p",
     "voice": "Оригинал",

@@ -1,6 +1,7 @@
 package dev.aniart.vr;
 
 import android.app.NativeActivity;
+import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.graphics.SurfaceTexture;
@@ -18,9 +19,14 @@ import androidx.media3.common.MimeTypes;
 import androidx.media3.common.PlaybackException;
 import androidx.media3.common.Player;
 import androidx.media3.common.VideoSize;
+import androidx.media3.common.audio.AudioProcessor;
 import androidx.media3.datasource.DefaultDataSource;
 import androidx.media3.datasource.DefaultHttpDataSource;
 import androidx.media3.exoplayer.ExoPlayer;
+import androidx.media3.exoplayer.DefaultRenderersFactory;
+import androidx.media3.exoplayer.audio.AudioCapabilities;
+import androidx.media3.exoplayer.audio.AudioSink;
+import androidx.media3.exoplayer.audio.DefaultAudioSink;
 import androidx.media3.exoplayer.analytics.AnalyticsListener;
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory;
 import java.io.File;
@@ -47,6 +53,9 @@ public final class CinemaActivity extends NativeActivity {
     private boolean foreground;
     private boolean playRequested;
     private boolean autoNext;
+    private boolean roomSound;
+    private volatile float headYaw;
+    private volatile int roomInputChannels;
     private float volume;
     private float speed;
     private ExoPlayer player;
@@ -73,6 +82,7 @@ public final class CinemaActivity extends NativeActivity {
     @Override public void onCreate(Bundle state) {
         preferences = getSharedPreferences("cinema", MODE_PRIVATE);
         autoNext = preferences.getBoolean("auto_next", true);
+        roomSound = preferences.getBoolean("room_sound", false);
         volume = preferences.getFloat("volume", 1f);
         speed = preferences.getFloat("speed", 1f);
         try (var input = getAssets().open("catalog.json")) {
@@ -209,6 +219,21 @@ public final class CinemaActivity extends NativeActivity {
     }
 
     public int renderConfig() { return panel.renderConfig(); }
+    public void setHeadYaw(float yaw) { headYaw = yaw; }
+    int roomInputChannels() { return roomInputChannels; }
+
+    void setRoomSound(boolean enabled) {
+        ui.post(() -> {
+            if (roomSound == enabled) return;
+            roomSound = enabled;
+            preferences.edit().putBoolean("room_sound", enabled).apply();
+            if (player != null && playing != null && player.getPlayerError() == null
+                    && player.getPlaybackState() != Player.STATE_ENDED) {
+                long position = player.isCurrentMediaItemSeekable() ? player.getCurrentPosition() : C.TIME_UNSET;
+                startPlayer(playing, position, playRequested);
+            }
+        });
+    }
     public void command(int command) { panel.command(command); }
     public void clickPanel(float x, float y) { panel.click(x, y); }
     public void uploadPanel(float x, float y, int filterStatus, int width, int height,
@@ -302,6 +327,7 @@ public final class CinemaActivity extends NativeActivity {
         frame.set(false);
         format = 0;
         generation.incrementAndGet();
+        roomInputChannels = 0;
         playing = null;
         playingShared = false;
         playRequested = false;
@@ -327,17 +353,25 @@ public final class CinemaActivity extends NativeActivity {
             publish();
             return;
         }
+        startPlayer(episode, resume ? positionFor(episode) : C.TIME_UNSET, true);
+    }
+
+    private void startPlayer(Catalog.Episode episode, long position, boolean autoPlay) {
+        if (surface == null) return;
         releasePlayer();
         var http = new DefaultHttpDataSource.Factory().setDefaultRequestProperties(episode.headers());
         var data = new DefaultDataSource.Factory(this, http);
-        ExoPlayer active = new ExoPlayer.Builder(this).setMediaSourceFactory(new DefaultMediaSourceFactory(data)).build();
+        ExoPlayer.Builder builder = roomSound ? new ExoPlayer.Builder(this, roomRenderers()) : new ExoPlayer.Builder(this);
+        ExoPlayer active = builder.setMediaSourceFactory(new DefaultMediaSourceFactory(data)).build();
         player = active;
         playing = episode;
         playingShared = episode == sharedEpisode;
-        playRequested = true;
+        playRequested = autoPlay;
         status = "Загрузка";
         active.setAudioAttributes(new AudioAttributes.Builder().setUsage(C.USAGE_MEDIA)
-                .setContentType(C.AUDIO_CONTENT_TYPE_MOVIE).build(), true);
+                .setContentType(C.AUDIO_CONTENT_TYPE_MOVIE)
+                .setSpatializationBehavior(roomSound ? C.SPATIALIZATION_BEHAVIOR_NEVER : C.SPATIALIZATION_BEHAVIOR_AUTO)
+                .build(), true);
         active.setVideoSurface(surface);
         active.setVolume(volume);
         active.setPlaybackSpeed(speed);
@@ -390,11 +424,24 @@ public final class CinemaActivity extends NativeActivity {
         });
         MediaItem item = new MediaItem.Builder().setUri(episode.url())
                 .setMimeType(episode.hls() ? MimeTypes.APPLICATION_M3U8 : MimeTypes.VIDEO_MP4).build();
-        long position = resume ? positionFor(episode) : 0;
         active.setMediaItem(item, position > 0 ? position : C.TIME_UNSET);
         active.prepare();
-        active.setPlayWhenReady(foreground);
+        active.setPlayWhenReady(foreground && autoPlay);
         publish();
+    }
+
+    private DefaultRenderersFactory roomRenderers() {
+        return new DefaultRenderersFactory(this) {
+            @Override protected AudioSink buildAudioSink(Context context, boolean floatOutput, boolean speedParams) {
+                return new DefaultAudioSink.Builder(context)
+                        .setAudioCapabilities(AudioCapabilities.DEFAULT_AUDIO_CAPABILITIES)
+                        .setEnableFloatOutput(false)
+                        .setEnableAudioTrackPlaybackParams(speedParams)
+                        .setAudioProcessors(new AudioProcessor[]{
+                                new RoomAudioProcessor(() -> headYaw, channels -> roomInputChannels = channels)
+                        }).build();
+            }
+        };
     }
 
     private void publish() {

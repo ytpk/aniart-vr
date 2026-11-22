@@ -74,7 +74,7 @@ index 93e708c..1c7558d 100644
  source_group("Headers" FILES ${LOCAL_HEADERS})
  source_group("Shaders" FILES ${VULKAN_SHADERS})
 diff --git a/src/tests/hello_xr/graphicsplugin_opengles.cpp b/src/tests/hello_xr/graphicsplugin_opengles.cpp
-index d5249e6..f7bc692 100644
+index d5249e6..0f99a85 100644
 --- a/src/tests/hello_xr/graphicsplugin_opengles.cpp
 +++ b/src/tests/hello_xr/graphicsplugin_opengles.cpp
 @@ -12,6 +12,9 @@
@@ -126,7 +126,7 @@ index d5249e6..f7bc692 100644
  
 +#ifdef XR_USE_PLATFORM_ANDROID
 +        UNUSED_PARM(cubes);
-+        m_cinema.Draw(vp, pose.position);
++        m_cinema.Draw(vp, pose.position, pose.orientation);
 +#else
          // Set cube primitive data.
          glBindVertexArray(m_vao);

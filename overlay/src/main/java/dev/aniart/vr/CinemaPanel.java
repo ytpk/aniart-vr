@@ -54,7 +54,7 @@ final class CinemaPanel {
     private boolean favoritesOnly, keyboard, cyrillic = true;
     private String search = "";
     private int stereo, depth, screenSize;
-    private boolean fast, comparison, reverse, autoNext;
+    private boolean fast, comparison, reverse, autoNext, roomSound;
     private int hovered = -1;
     private boolean dirty = true, allocated;
     private float fps, gpuMs = -1;
@@ -74,6 +74,7 @@ final class CinemaPanel {
         depth = Math.max(0, Math.min(10, preferences.getInt("depth", 4)));
         screenSize = Math.max(0, Math.min(2, preferences.getInt("screen_size", 1)));
         autoNext = preferences.getBoolean("auto_next", true);
+        roomSound = preferences.getBoolean("room_sound", false);
     }
 
     void shutdown() { anixart.shutdown(); }
@@ -111,7 +112,7 @@ final class CinemaPanel {
             show(HIDDEN);
         }
         return page | (fast ? 8 : 0) | (comparison ? 16 : 0) | (stereo << 5)
-                | (reverse ? 256 : 0) | (depth << 9) | (screenSize << 13);
+                | (reverse ? 256 : 0) | (depth << 9) | (screenSize << 13) | (roomSound ? 1 << 15 : 0);
     }
 
     private void changeStereo(int mode) {
@@ -590,7 +591,22 @@ final class CinemaPanel {
             settingsChanged();
         });
         button("Импорт каталога", 808, 521, 440, 60, false, activity::pickCatalog);
-        text(notice.isEmpty() ? "Левый стик перемещает экран при просмотре" : notice, 32, 621, 23, MUTED, 1216, false);
+        button(roomSound ? "Звук зала: вкл." : "Звук зала: выкл.", 32, 599, 268, 55, roomSound, () -> {
+            roomSound = !roomSound;
+            activity.setRoomSound(roomSound);
+        });
+        String audio = notice;
+        if (audio.isEmpty() && roomSound) {
+            audio = switch (activity.roomInputChannels()) {
+                case 1 -> "Моно → виртуальный зал";
+                case 2 -> "Стерео → виртуальный зал";
+                case 6 -> "5.1 → виртуальные колонки";
+                case 8 -> "7.1 → виртуальные колонки";
+                case 0 -> "Виртуальные 7.1 с отражениями";
+                default -> "Звук зала недоступен для формата дорожки";
+            };
+        }
+        if (!audio.isEmpty()) text(audio, 320, 636, 22, MUTED, 905, false);
         String stats = String.format(Locale.ROOT, "%.0f FPS", fps);
         if (filterStatus == 1 && gpuMs >= 0) stats += String.format(Locale.ROOT, "  ·  GPU %.1f мс", gpuMs);
         stats += "  ·  " + stereoStatus();

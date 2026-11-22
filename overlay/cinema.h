@@ -44,6 +44,11 @@ inline GLuint Program(const char* vertex, const char* fragment) {
     return program;
 }
 
+} // namespace Cinema
+
+#include "vr_room.h"
+
+namespace Cinema {
 class Screen {
     static constexpr const char* vertex = R"glsl(#version 300 es
 uniform mat4 mvp;
@@ -118,6 +123,8 @@ void main() {
 }
 )glsl";
 
+    Room room;
+    jmethodID headYaw = nullptr;
     GLuint oes = 0, panel = 0, vao = 0, fbo = 0, video = 0, flat = 0, beam = 0;
     GLuint textures[7]{}, passes[5]{}, depth = 0;
     enum class FilterStatus { Off, Active, Waiting, TooLarge, Unavailable };
@@ -346,11 +353,13 @@ public:
         upload = env->GetMethodID(cls, "uploadPanel", "(FFIIIZFF)V");
         readConfig = env->GetMethodID(cls, "renderConfig", "()I");
         click = env->GetMethodID(cls, "clickPanel", "(FF)V");
+        headYaw = env->GetMethodID(cls, "setHeadYaw", "(F)V");
         commandMethod = env->GetMethodID(cls, "command", "(I)V");
         env->DeleteLocalRef(cls);
         auto array = env->NewFloatArray(16);
         transformArray = static_cast<jfloatArray>(env->NewGlobalRef(array));
         env->DeleteLocalRef(array);
+        room.Open();
         glGenVertexArrays(1, &vao);
         glGenFramebuffers(1, &fbo);
         glGenTextures(1, &oes);
@@ -472,19 +481,17 @@ public:
         if (config & 7) UpdatePanel();
     }
 
-    void Draw(const XrMatrix4x4f& vp, const XrVector3f& eyePosition) {
+    void Draw(const XrMatrix4x4f& vp, const XrVector3f& eyePosition, const XrQuaternionf& orientation) {
         constexpr XrQuaternionf front{0, 0, 0, 1};
-        constexpr XrQuaternionf floor{-0.70710678f, 0, 0, 0.70710678f};
-        constexpr XrQuaternionf side{0, 0.70710678f, 0, 0.70710678f};
-        glDisable(GL_CULL_FACE);
-        glBindVertexArray(vao);
-        Quad(vp, {0, -1.35f, -2.4f}, 7, 9, floor, 0, .045f, .038f, .065f);
-        Quad(vp, {0, 0.5f, -5.85f}, 7, 3.7f, front, 0, .075f, .065f, .10f);
-        Quad(vp, {-3.5f, 0.5f, -2.4f}, 7, 3.7f, side, 0, .055f, .045f, .08f);
-        Quad(vp, {3.5f, 0.5f, -2.4f}, 7, 3.7f, side, 0, .055f, .045f, .08f);
-        for (float x : {-2.05f, 2.05f}) {
-            Quad(vp, {x, -1.33f, -2.4f}, .045f, 7, floor, 0, .24f, .14f, .38f);
+        if (eye == 0 && (config & (1 << 15))) {
+            const auto& q = orientation;
+            const float x = -2 * (q.x*q.z + q.w*q.y);
+            const float z = -1 + 2 * (q.x*q.x + q.y*q.y);
+            if (x*x + z*z > .01f) env->CallVoidMethod(activity, headYaw, std::atan2(x, -z));
         }
+        glDisable(GL_CULL_FACE);
+        room.Draw(vp);
+        glBindVertexArray(vao);
         float aspect = width && height ? float(width) / height : 16.0f / 9.0f;
         const int layout = Layout();
         // Full-packed sources are very wide (SBS) or nearly square/tall (OU).
@@ -492,11 +499,14 @@ public:
         if (layout == 1 && aspect > 2.65f) aspect *= .5f;
         if (layout == 2 && aspect < 1.22f) aspect *= 2;
         const int size = (config >> 13) & 3;
-        const float w = size == 0 ? 2.8f : size == 1 ? 3.8f : 4.8f;
-        const float h = std::min(w / aspect, 2.45f);
+        const float w = size == 0 ? 3.55f : size == 1 ? 4.85f : 5.95f;
+        const float h = std::min(w / aspect, 2.72f);
         const float actualWidth = h * aspect;
-        Quad(vp, {screenX, .38f + screenY, -4.25f}, actualWidth + .14f, h + .14f, front, 0, .19f, .13f, .28f);
-        const XrVector3f screen{screenX, .38f + screenY, -4.23f};
+        const float screenLimit = 3.67f - actualWidth * .5f;
+        const float x = std::clamp(screenX, -screenLimit, screenLimit);
+        const float y = std::clamp(.38f + screenY, -1.23f + h*.5f, 2.37f - h*.5f);
+        Quad(vp, {x, y, -5.12f}, actualWidth + .19f, h + .19f, front, 0, .013f, .010f, .020f);
+        const XrVector3f screen{x, y, -5.10f};
         if (width && sourceW && sourceH) {
             const int view = (eye != 0) ^ ((config & 256) != 0);
             const int operation = filtered && filteredLayout == layout ? ((config & 16) ? 2 : 1) : 0;
@@ -514,6 +524,7 @@ public:
     }
 
     void Close() {
+        room.Close();
         if (opened) env->CallVoidMethod(activity, close);
         if (transformArray) env->DeleteGlobalRef(transformArray);
         if (query) deleteQuery(1, &query);
