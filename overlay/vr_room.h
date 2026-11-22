@@ -16,7 +16,7 @@ layout(location=0) in vec3 position;
 layout(location=1) in vec3 tint;
 layout(location=2) in float material;
 layout(location=3) in vec3 normal;
-uniform int darkMode, hasLight;
+uniform highp int darkMode, hasLight;
 uniform sampler2D screenLight;
 uniform vec4 screenRect;
 uniform mat4 vp;
@@ -55,7 +55,7 @@ in vec3 world;
 in vec3 color;
 flat in float surfaceType;
 out vec4 outColor;
-uniform int darkMode;
+uniform highp int darkMode;
 float grain(vec3 p) {
     vec3 cell = fract(floor(p) * vec3(.1031, .1137, .1379));
     return fract(dot(cell, cell.yzx + 19.19));
