@@ -67,6 +67,19 @@ class AniCliCheck(unittest.TestCase):
         self.assertEqual(send.call_count, 2)
         self.assertEqual(output.getvalue().strip(), 'AniCli HTTP player.example failed ConnectTimeout')
 
+    def test_empty_upstream_result_keeps_http_failure(self):
+        response = httpx.Response(403)
+        request = httpx.Request('GET', 'https://player.example/catalog')
+        with bridge.CatalogTransport() as transport, redirect_stdout(StringIO()), \
+                patch.object(httpx.HTTPTransport, 'handle_request', return_value=response):
+            def upstream():
+                transport.handle_request(request)
+                return []
+
+            with self.assertRaisesRegex(bridge.CatalogError, '^HTTP 403$'):
+                bridge._run(upstream)
+        self.assertEqual(bridge._run(list), [])
+
     def test_yummy_preserves_fractional_episodes(self):
         from anicli_api.source.yummy_anime import Anime, YummyAnimeApi
 

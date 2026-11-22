@@ -3,6 +3,7 @@
 from functools import lru_cache
 from importlib import import_module
 from collections import defaultdict
+from contextvars import ContextVar
 from decimal import Decimal, InvalidOperation
 import re
 import socket
@@ -66,6 +67,24 @@ class CatalogError(Exception):
     pass
 
 
+_request_error = ContextVar("request_error", default=None)
+
+
+def _error_reason(error):
+    if isinstance(error, httpx.TimeoutException):
+        return "Сервис не ответил вовремя"
+    cause = error
+    for _ in range(8):
+        if cause is None:
+            break
+        if isinstance(cause, ssl.SSLCertVerificationError):
+            return "Ошибка проверки HTTPS-сертификата"
+        if isinstance(cause, socket.gaierror):
+            return "DNS не смог найти сервер"
+        cause = cause.__cause__ or cause.__context__
+    return "Сервис недоступен из этой сети"
+
+
 class CatalogTransport(HTTPRetryConnectSyncTransport):
     # Upstream makes one final request after its retry loop.
     ATTEMPTS_CONNECT = 1
@@ -75,6 +94,7 @@ class CatalogTransport(HTTPRetryConnectSyncTransport):
         try:
             response = super().handle_request(request)
         except httpx.HTTPError as error:
+            _request_error.set(_error_reason(error))
             chain = error
             types = []
             while chain is not None and len(types) < 8:
@@ -83,28 +103,42 @@ class CatalogTransport(HTTPRetryConnectSyncTransport):
             print(f"AniCli HTTP {host} failed {'/'.join(types)}", flush=True)
             raise
         print(f"AniCli HTTP {host} status={response.status_code}", flush=True)
+        _request_error.set(f"HTTP {response.status_code}" if response.is_error else None)
         return response
 
 
+class CatalogClient(HTTPSync):
+    # Keep HTTPX proxy and TLS configuration while substituting our transport.
+    def _init_transport(self, *, transport, **options):
+        return transport if transport is not None else CatalogTransport(**options)
+
+    def _init_proxy_transport(self, proxy, **options):
+        return CatalogTransport(proxy=proxy, **options)
+
+
 def _run(call, *args):
+    scope = _request_error.set(None)
     try:
-        return call(*args)
+        result = call(*args)
+        failure = _request_error.get()
+        if not result and failure:
+            # Some upstream extractors return an empty list on a failed request.
+            raise CatalogError(failure)
+        return result
+    except CatalogError:
+        raise
     except httpx.HTTPStatusError as error:
         raise CatalogError(f"HTTP {error.response.status_code}") from None
-    except httpx.TimeoutException:
-        raise CatalogError("Сервис не ответил вовремя") from None
     except httpx.RequestError as error:
-        cause = error
-        while cause is not None:
-            if isinstance(cause, ssl.SSLCertVerificationError):
-                raise CatalogError("Ошибка проверки HTTPS-сертификата") from None
-            if isinstance(cause, socket.gaierror):
-                raise CatalogError("DNS не смог найти сервер") from None
-            cause = cause.__cause__ or cause.__context__
-        raise CatalogError("Сервис недоступен из этой сети") from None
+        raise CatalogError(_error_reason(error)) from None
     except Exception as error:
         print(f"AniCli extractor failed {type(error).__name__}", flush=True)
+        failure = _request_error.get()
+        if failure:
+            raise CatalogError(failure) from None
         raise CatalogError("Не удалось прочитать ответ сервиса") from None
+    finally:
+        _request_error.reset(scope)
 
 
 @lru_cache(maxsize=len(PROVIDERS))
@@ -112,7 +146,7 @@ def _extractor(provider):
     if provider not in dict(PROVIDERS):
         raise ValueError("Unknown provider")
     module = import_module(f"anicli_api.source.{provider}")
-    return module.Extractor(http_client=HTTPSync(timeout=6.0, transport=CatalogTransport(http2=True)))
+    return module.Extractor(http_client=CatalogClient(timeout=6.0))
 
 
 def titles(provider, query):
