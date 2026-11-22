@@ -83,7 +83,7 @@ final class CinemaPanel {
         comparison = preferences.getBoolean("comparison", false);
         reverse = preferences.getBoolean("reverse_eyes", false);
         depth = Math.max(0, Math.min(10, preferences.getInt("depth", 4)));
-        depthModel = Math.max(0, Math.min(3, preferences.getInt("depth_model", 1)));
+        depthModel = Math.max(0, Math.min(7, preferences.getInt("depth_model", 1)));
         screenSize = Math.max(0, Math.min(2, preferences.getInt("screen_size", 1)));
         autoNext = preferences.getBoolean("auto_next", true);
         roomSound = preferences.getBoolean("room_sound", false);
@@ -130,7 +130,7 @@ final class CinemaPanel {
         }
         return page | (fast ? 8 : 0) | (comparison ? 16 : 0) | (stereo << 5)
                 | (reverse ? 256 : 0) | (depth << 9) | (screenSize << 13) | (roomSound ? 1 << 15 : 0)
-                | (depthModel << 16) | (antialias ? 1 << 18 : 0) | (deband ? 1 << 19 : 0)
+                | (depthModel << 24) | (antialias ? 1 << 18 : 0) | (deband ? 1 << 19 : 0)
                 | (darkRoom ? 1 << 20 : 0) | (prefer90 ? 1 << 21 : 0) | (smoothLaser ? 1 << 22 : 0) | (dehalo ? 1 << 23 : 0);
     }
 
@@ -606,7 +606,7 @@ final class CinemaPanel {
                 + " | " + GLES20.glGetString(GLES20.GL_VERSION)
                 + String.format(Locale.ROOT, " | FPS %.1f | Display %.1f Hz | Anime4K GPU %.2f ms"
                         + " | Eye MSAA %b | Stereo %d | Video %s",
-                        fps, displayHz, gpuMs, eyeMsaa, stereo, frameSize())));
+                        fps, displayHz, gpuMs, eyeMsaa, stereo, frameSize()), frameWidth > 0));
         button(dehalo ? "Dehalo: вкл." : "Dehalo: выкл.", 918, 246, 330, 52, dehalo, () -> {
             dehalo = !dehalo;
             settingsChanged();
@@ -633,7 +633,7 @@ final class CinemaPanel {
                 settingsChanged();
             });
             button(DepthModels.label(depthModel) + "  ›", 716, 385, depthModel == 2 ? 181 : 532, 58, true, () -> {
-                depthModel = (depthModel + 1) % 4;
+                depthModel = (depthModel + 1) % 8;
                 settingsChanged();
             });
             if (depthModel == 2) {

@@ -199,6 +199,8 @@ void main() {
     Pointer previousAim;
     int aimPage = -1, aimHand = -1;
     int depthModel = -1;
+    jmethodID wantsDiagnosticDepth = nullptr, submitDiagnosticDepth = nullptr;
+    bool diagnosticDepthReadback = false;
     jmethodID selectDepth = nullptr, wantsDepth = nullptr, submitDepth = nullptr, takeDepth = nullptr;
     jbyteArray depthInput = nullptr;
     static constexpr int captureBytes = depthCaptureW * depthCaptureH * 4;
@@ -475,6 +477,8 @@ public:
         selectDepth = env->GetMethodID(cls, "selectDepthModel", "(I)V");
         wantsDepth = env->GetMethodID(cls, "wantsDepthFrame", "()Z");
         submitDepth = env->GetMethodID(cls, "submitDepthFrame", "([B)V");
+        wantsDiagnosticDepth = env->GetMethodID(cls, "wantsDiagnosticDepthFrame", "()Z");
+        submitDiagnosticDepth = env->GetMethodID(cls, "submitDiagnosticDepthFrame", "([B)V");
         takeDepth = env->GetMethodID(cls, "takeDepthMap", "()[B");
         env->DeleteLocalRef(cls);
         auto array = env->NewFloatArray(16);
@@ -628,7 +632,7 @@ public:
         }
         const bool fast = config & 8;
         const bool parallax = ((config >> 5) & 7) == 3;
-        const int newModel = parallax ? (config >> 16) & 3 : 0;
+        const int newModel = parallax ? (config >> 24) & 7 : 0;
         if (depthModel != newModel || format < 0) {
             depthModel = newModel;
             depthReady = false;
@@ -681,29 +685,42 @@ public:
                 const float speed = targetDepthStrength * (advancing ? std::clamp((1.1f - age) / .5f, 0.f, 1.f) : 1.f);
                 depthStrength += (speed - depthStrength) * .10f;
             }
+        }
+        const bool diagnostic = hasFrame && env->CallBooleanMethod(activity, wantsDiagnosticDepth);
+        if (hasFrame) {
             if (readbackFence) {
                 const GLenum ready = glClientWaitSync(readbackFence, 0, 0);
                 if (ready != GL_TIMEOUT_EXPIRED) {
                     glDeleteSync(readbackFence);
                     readbackFence = nullptr;
-                    if (ready != GL_WAIT_FAILED && env->CallBooleanMethod(activity, wantsDepth)) {
+                    if (ready != GL_WAIT_FAILED && (diagnosticDepthReadback ? diagnostic :
+                            env->CallBooleanMethod(activity, wantsDepth))) {
                         glBindBuffer(GL_PIXEL_PACK_BUFFER, depthReadback);
                         const auto* data = static_cast<const jbyte*>(
                                 glMapBufferRange(GL_PIXEL_PACK_BUFFER, 0, captureBytes, GL_MAP_READ_BIT));
                         if (data) {
                             env->SetByteArrayRegion(depthInput, 0, captureBytes, data);
                             glUnmapBuffer(GL_PIXEL_PACK_BUFFER);
-                            submittedDepth = lastDepth;
-                            env->CallVoidMethod(activity, submitDepth, depthInput);
+                            if (diagnosticDepthReadback) {
+                                env->CallVoidMethod(activity, submitDiagnosticDepth, depthInput);
+                            } else {
+                                submittedDepth = lastDepth;
+                                env->CallVoidMethod(activity, submitDepth, depthInput);
+                            }
                         }
                         glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
                     }
                 }
             }
-            captureDepth = !readbackFence && (newFrame || lastDepth.time_since_epoch().count() == 0)
-                           && now - lastDepth >= std::chrono::milliseconds(125)
-                           && env->CallBooleanMethod(activity, wantsDepth);
-            if (captureDepth) lastDepth = now;
+            const bool captureDiagnostic = !readbackFence && diagnostic
+                    && env->CallBooleanMethod(activity, wantsDiagnosticDepth);
+            const bool captureLive = !readbackFence && depthModel != 0
+                    && (newFrame || lastDepth.time_since_epoch().count() == 0)
+                    && now - lastDepth >= std::chrono::milliseconds(125)
+                    && env->CallBooleanMethod(activity, wantsDepth);
+            captureDepth = captureDiagnostic || captureLive;
+            if (captureDepth) diagnosticDepthReadback = captureDiagnostic;
+            if (captureLive) lastDepth = now;
         }
         if (!fast || !supported || filteredLayout != layout) filtered = false;
         if (!parallax) depthReady = false;

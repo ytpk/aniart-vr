@@ -240,9 +240,12 @@ public final class CinemaActivity extends NativeActivity {
     public void submitDepthFrame(byte[] rgba) { depthModels.submit(rgba); }
     public byte[] takeDepthMap() { return depthModels.takeMap(); }
     String depthStatus() { return depthModels.status(); }
-    void testDepth(String renderer) {
-        depthModels.runDiagnostics("Aniart VR " + BuildConfig.VERSION_NAME + " | " + renderer,
-                message -> notice = message);
+    public boolean wantsDiagnosticDepthFrame() { return depthModels.wantsDiagnosticFrame(); }
+    public void submitDiagnosticDepthFrame(byte[] frame) { depthModels.submitDiagnosticFrame(frame); }
+    void testDepth(String renderer, boolean hasVideoFrame) {
+        Runnable timeout = depthModels.runDiagnostics("Aniart VR " + BuildConfig.VERSION_NAME + " | " + renderer,
+                hasVideoFrame, message -> notice = message);
+        if (timeout != null) ui.postDelayed(timeout, 2500);
     }
     public void setHeadYaw(float yaw) { headYaw = yaw; }
     int roomInputChannels() { return roomInputChannels; }

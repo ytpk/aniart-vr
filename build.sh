@@ -43,6 +43,18 @@ vda_release=https://huggingface.co/EmreGneri/video-depth-anything-small-stream/r
 copy_depth_model "$vda_release" encoder_fp16.onnx 3c774358e5dc294fd69366869e4cae5eb27d240658194043c291899cc577f6a1 '?download=true'
 copy_depth_model "$vda_release" bootstrap_fp16.onnx bc8bef05465c2a80e7ac2ee166a7b553bf0e54f4c64f328866b24a9ebd34d564 '?download=true'
 copy_depth_model "$vda_release" stream_fp16.onnx 9120ea5b7b45730c246f9f41cb5352bfe5988097f5912dd29c35ba6a4d7a227b '?download=true'
+if [[ "${ANIART_DEPTH_BENCH:-0}" == 1 ]]; then
+    limbo=LimboV3_504x280_fp32.onnx
+    int8=limbo-v3-cpu-dynamic-int8.onnx
+    copy_depth_model https://github.com/NevermindNilas/TAS-Models-Host/releases/download/main "$limbo" 6a8f894f08fdb651036c3e6875bf357574b03003a4da2ae1ca9e82b66fc8534f
+    if [[ ! -f "$weights/$int8" || tools/quantize_depth.py -nt "$weights/$int8" || "$weights/$limbo" -nt "$weights/$int8" ]]; then
+        python3 tools/quantize_depth.py "$weights/$limbo" "$weights/$int8.part"
+        mv "$weights/$int8.part" "$weights/$int8"
+    fi
+    cp "$weights/$int8" "$app/src/main/assets/depth/"
+else
+    rm -f "$app/src/main/assets/depth/"{LimboV3_504x280_fp32.onnx,limbo-v3-cpu-dynamic-int8.onnx}
+fi
 python3 generate_shaders.py Anime4K_Upscale_CNN_x2_S.glsl "$app/anime4k_generated.h"
 cd "$app"
 ./gradlew --no-daemon assembleDebug "$@"

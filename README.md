@@ -117,13 +117,17 @@ Media3 выводит декодированные кадры в `SurfaceTexture
 - **Limbo V3 504×280.** Экспериментальный покадровый ONNX на CPU. Нажмите «Скачать» для загрузки с GitHub автора. Для ручного импорта выберите «Файл Limbo» и укажите оригинальный `LimboV3_504x280_fp32.onnx`, полученный на условиях автора модели. [TheAnimeScripter](https://github.com/NevermindNilas/TheAnimeScripter/releases/tag/v3.1.0)
 - **Video Depth Anything Small 266×154.** Потоковый ONNX на CPU с кэшем предыдущих кадров. Все три графа входят в APK. [Экспорт и лицензия Apache 2.0](https://huggingface.co/EmreGneri/video-depth-anything-small-stream)
 
-Подключите Quest по ADB и запустите команду ниже. В настройках приложения нажмите **Диагностика 3D** и дождитесь строки `Diagnostics end`. Кнопка проверяет ZipDepth отдельно на GPU и CPU, оба этапа Video Depth Anything и Limbo при наличии весов. Для проверки используется синтетический кадр, поэтому открывать видео не требуется.
+Подключите Quest по ADB, запустите команду ниже и нажмите **Настройки → Диагностика 3D** во время просмотра. Все модели получат один и тот же декодированный кадр 256×144 до Anime4K, а воспроизведение продолжится. В журнале появятся источник кадра, его хеш, время инициализации и время каждого прогона. Первый прогон холодный, последующие — с уже загруженной моделью. Video Depth Anything использует тот же кадр для проверки первого и потокового этапов.
 
 ```sh
-adb logcat -v threadtime -T 1 -s AniartDepth tflite LiteRT onnxruntime adsprpc cdsprpc linker AndroidRuntime > aniart-depth-check.txt
+adb logcat -v threadtime -T 1 -s AniartDepth tflite LiteRT onnxruntime adsprpc cdsprpc linker AndroidRuntime > aniart-depth-video.txt
 ```
 
-Эта же кнопка запускает три проверки **QNN HTP**. `QNN direct` проверяет загрузку FastRPC и вызывает `backendCreate` через Qualcomm QNN. `QNN HTP auto` и `QNN HTP XR2 Gen 2` проверяют результат 8-битной свёртки без отката на CPU. Во втором прогоне ONNX Runtime получает явные параметры `soc_model=53` и `htp_arch=69`. Каждый прогон пишет в лог свой результат и этап сбоя. Используются ONNX Runtime QNN 1.24.3 и Qualcomm QNN Runtime 2.42.0. [QNN Execution Provider](https://onnxruntime.ai/docs/execution-providers/QNN-ExecutionProvider.html), [лицензия Qualcomm](overlay/src/main/assets/licenses/qnn/LICENSE.pdf), [уведомления](overlay/src/main/assets/licenses/qnn/NOTICE.txt).
+- **ZipDepth:** один widescreen-граф на GPU с разрешённым FP16 или с отключённым снижением точности, тот же граф на CPU и отдельный квантованный вариант для CPU. Флаг GPU задаёт допустимую точность делегата. Веса widescreen-графа остаются общими.
+- **Limbo V3:** исходный FP32 и экспериментальный CPU-вариант с динамическим INT8 для MatMul с постоянными весами. Бенчмарк APK включает обе версии. Вариант INT8 собран из исходных весов скриптом `tools/quantize_depth.py`. [Limbo V3 от NevermindNilas и условия CC BY-NC 4.0](https://github.com/NevermindNilas/Ai-models/blob/4c0950ecc08629cda85754d0766d6deb2e95495a/Limbo-V3/LICENSE.MD)
+- **Video Depth Anything:** исходная потоковая модель FP16 на CPU для сравнения.
+
+Для локальной сборки с весами Limbo установите `onnxruntime==1.24.3`, `onnx==1.23.2` и `numpy==2.5.5`, затем запустите `ANIART_DEPTH_BENCH=1 ./build.sh`. GitHub Actions собирает этот APK для некоммерческого тестирования. При запуске диагностики без видео используется синтетический кадр и дополнительно запускаются тесты Qualcomm QNN HTP. [QNN Execution Provider](https://onnxruntime.ai/docs/execution-providers/QNN-ExecutionProvider.html) · [Лицензия Qualcomm](overlay/src/main/assets/licenses/qnn/LICENSE.pdf) · [Уведомления Qualcomm](overlay/src/main/assets/licenses/qnn/NOTICE.txt)
 
 Веса ZipDepth и Video Depth Anything скачиваются при сборке и проверяются по SHA-256. Если на Quest нет файлового менеджера для импорта Limbo, в debug-сборке можно загрузить файл через ADB и снова выбрать Limbo V3:
 

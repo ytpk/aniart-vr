@@ -38,6 +38,7 @@ final class DepthModels {
     private static final String LIMBO_URL =
             "https://github.com/NevermindNilas/TAS-Models-Host/releases/download/main/" + LIMBO_FILE;
     static final int CAPTURE_W = 256, CAPTURE_H = 144, MAP_W = 192, MAP_H = 108;
+    private static final String LIMBO_INT8 = "limbo-v3-cpu-dynamic-int8.onnx";
     private static final String ZIP_GPU = "zipdepth-wide-320x180-t320x192-edgepad-gpu.tflite";
     private static final String ZIP_CPU = "zipdepth-base-256-cpu.tflite";
     private static final String LIMBO_HASH = "6a8f894f08fdb651036c3e6875bf357574b03003a4da2ae1ca9e82b66fc8534f";
@@ -47,6 +48,8 @@ final class DepthModels {
     private final Context context;
     private final ExecutorService worker = Executors.newSingleThreadExecutor();
     private final AtomicBoolean checking = new AtomicBoolean();
+    private record Diagnostics(String renderer, Consumer<String> report) {}
+    private volatile Diagnostics pendingDiagnostics;
     private volatile int epoch;
     private volatile int selected;
     private volatile boolean busy, closed, failed;
@@ -64,9 +67,13 @@ final class DepthModels {
 
     static String label(int model) {
         return switch (model) {
-            case 1 -> "ZipDepth";
+            case 1 -> "ZipDepth GPU FP16";
             case 2 -> "Limbo V3";
             case 3 -> "Video Depth Anything";
+            case 4 -> "ZipDepth GPU FP32";
+            case 5 -> "ZipDepth CPU Quant";
+            case 6 -> "ZipDepth CPU Wide";
+            case 7 -> "Limbo V3 CPU INT8";
             default -> "По яркости";
         };
     }
@@ -86,44 +93,78 @@ final class DepthModels {
 
     boolean wantsFrame() { return selected != 0 && !busy && !failed && !closed && !checking.get(); }
 
-    synchronized void runDiagnostics(String renderer, Consumer<String> report) {
-        if (closed || !checking.compareAndSet(false, true)) return;
+    boolean wantsDiagnosticFrame() { return pendingDiagnostics != null; }
+
+    synchronized Runnable runDiagnostics(String renderer, boolean video, Consumer<String> report) {
+        if (closed || !checking.compareAndSet(false, true)) return null;
+        var request = new Diagnostics(renderer, report);
+        if (video) {
+            pendingDiagnostics = request;
+            report.accept("Захват кадра для диагностики…");
+            return () -> cancelDiagnosticFrame(request);
+        }
+        startDiagnostics(request, syntheticFrame(), false);
+        return null;
+    }
+
+    private synchronized void cancelDiagnosticFrame(Diagnostics request) {
+        if (pendingDiagnostics != request) return;
+        pendingDiagnostics = null;
+        checking.set(false);
+        Log.w("AniartDepth", "Diagnostics cancelled: no video frame received", null);
+        request.report().accept("Кадр не получен. Повторите при воспроизведении");
+    }
+
+    synchronized void submitDiagnosticFrame(byte[] frame) {
+        var request = pendingDiagnostics;
+        if (closed || request == null) return;
+        pendingDiagnostics = null;
+        startDiagnostics(request, frame.clone(), true);
+    }
+
+    private static byte[] syntheticFrame() {
+        byte[] rgba = new byte[CAPTURE_W * CAPTURE_H * 4];
+        for (int y = 0; y < CAPTURE_H; y++) {
+            for (int x = 0; x < CAPTURE_W; x++) {
+                int at = (y * CAPTURE_W + x) * 4;
+                rgba[at] = (byte) x;
+                rgba[at + 1] = (byte) (255 * y / CAPTURE_H);
+                rgba[at + 2] = (byte) (255 - x);
+                rgba[at + 3] = (byte) 255;
+            }
+        }
+        return rgba;
+    }
+
+    private void startDiagnostics(Diagnostics request, byte[] rgba, boolean video) {
+        var report = request.report();
         report.accept("Диагностика 3D…");
         worker.execute(() -> {
-            Log.i("AniartDepth", "Diagnostics begin | " + renderer
+            Log.i("AniartDepth", "Diagnostics begin | " + request.renderer()
+                    + " | sample=" + (video ? "video frame" : "synthetic")
+                    + " | frame hash=" + Integer.toHexString(Arrays.hashCode(rgba))
                     + " | Android " + android.os.Build.VERSION.SDK_INT
-                    + " | " + android.os.Build.MODEL + " | ABI " + Arrays.toString(android.os.Build.SUPPORTED_ABIS)
-                    + " | CPU logical cores " + Runtime.getRuntime().availableProcessors());
+                    + " | " + android.os.Build.MODEL + " | ABI " + Arrays.toString(android.os.Build.SUPPORTED_ABIS));
             try {
-                // The production interpreter and the diagnostic delegate share this thread.
                 release();
-                byte[] rgba = new byte[CAPTURE_W * CAPTURE_H * 4];
-                for (int y = 0; y < CAPTURE_H; y++) {
-                    for (int x = 0; x < CAPTURE_W; x++) {
-                        int at = (y * CAPTURE_W + x) * 4;
-                        rgba[at] = (byte) x;
-                        rgba[at + 1] = (byte) (255 * y / CAPTURE_H);
-                        rgba[at + 2] = (byte) (255 - x);
-                        rgba[at + 3] = (byte) 255;
-                    }
-                }
-                int passed = checkBackend("ZipDepth GPU", () -> new ZipLiteBackend(modelAsset(ZIP_GPU), true), rgba, 1);
-                passed += checkBackend("ZipDepth CPU", () -> loadCpu(1), rgba, 1);
+                int passed = checkBackend("ZipDepth GPU FP16 allowed",
+                        () -> new ZipLiteBackend(modelAsset(ZIP_GPU), true, true, true), rgba, 3);
+                passed += checkBackend("ZipDepth GPU FP32 requested",
+                        () -> new ZipLiteBackend(modelAsset(ZIP_GPU), true, true, false), rgba, 3);
+                passed += checkBackend("ZipDepth CPU widescreen",
+                        () -> new ZipLiteBackend(modelAsset(ZIP_GPU), true, false, false), rgba, 3);
+                passed += checkBackend("ZipDepth CPU quantized", () -> loadCpu(1), rgba, 3);
                 try {
                     Log.i("AniartDepth", "ONNX Runtime providers " + OrtEnvironment.getAvailableProviders());
                 } catch (RuntimeException | LinkageError error) {
                     Log.w("AniartDepth", "ONNX Runtime provider query failed", error);
                 }
                 passed += checkBackend("Video Depth Anything CPU", () -> loadCpu(3), rgba, 2);
-                String limbo;
-                if (new File(context.getFilesDir(), LIMBO_FILE).isFile()) {
-                    limbo = checkBackend("Limbo V3 CPU", () -> loadCpu(2), rgba, 1) == 1 ? "OK" : "ошибка";
-                } else {
-                    limbo = "нет файла";
-                    Log.i("AniartDepth", "Limbo V3 CPU skipped: weights not installed");
-                }
-                String htp = checkHtpDiagnostics();
-                report.accept("Глубина " + passed + "/3 · Limbo: " + limbo + " · QNN HTP: " + htp);
+                passed += checkBackend("Limbo V3 CPU FP32", () -> loadCpu(2), rgba, 3);
+                passed += checkBackend("Limbo V3 CPU dynamic INT8 MatMul",
+                        () -> loadLimbo(LIMBO_INT8), rgba, 3);
+                String htp = video ? "" : " · QNN HTP: " + checkHtpDiagnostics();
+                report.accept("Глубина " + passed + "/7" + htp);
             } catch (Exception | LinkageError error) {
                 Log.w("AniartDepth", "Diagnostics failed", error);
                 report.accept("Ошибка диагностики. См. AniartDepth");
@@ -223,13 +264,20 @@ final class DepthModels {
             for (int pass = 1; pass <= passes; pass++) {
                 start = System.nanoTime();
                 float[] depth = test.infer(frame);
+                long elapsed = (System.nanoTime() - start) / 1_000_000;
                 int finite = 0;
-                for (float value : depth) if (Float.isFinite(value)) finite++;
+                float min = Float.POSITIVE_INFINITY, max = Float.NEGATIVE_INFINITY;
+                for (float value : depth) {
+                    if (!Float.isFinite(value)) continue;
+                    finite++;
+                    min = Math.min(min, value);
+                    max = Math.max(max, value);
+                }
                 if (finite != depth.length || finite != test.width * (test.height - 2 * test.contentPadding())) {
                     throw new IOException("Unexpected depth output: " + depth.length + " values, " + finite + " finite");
                 }
                 Log.i("AniartDepth", name + " pass " + pass + ": "
-                        + (System.nanoTime() - start) / 1_000_000 + " ms, " + finite + " values");
+                        + elapsed + " ms, " + finite + " values, range=[" + min + ", " + max + "]");
             }
             return 1;
         } catch (Exception | LinkageError error) {
@@ -284,7 +332,7 @@ final class DepthModels {
                 try {
                     values = backend.infer(rgba);
                 } catch (RuntimeException | LinkageError error) {
-                    if (!isZipGpu() || job != epoch) throw error;
+                    if (model != 1 || !isZipGpu() || job != epoch) throw error;
                     Log.w("AniartDepth", "ZipDepth GPU fallback", error);
                     release();
                     backend = loadCpu(model);
@@ -292,7 +340,7 @@ final class DepthModels {
                     values = backend.infer(rgba);
                 }
                 byte[] map = normalize(values, backend.width, backend.height - 2 * backend.contentPadding(),
-                        model == 2, reset, model == 3);
+                        model == 2 || model == 7, reset, model == 3);
                 lastFrame = rgba.clone();
                 byte[] packet = Arrays.copyOf(map, map.length + 1);
                 packet[map.length] = (byte) (reset ? 1 : 0);
@@ -323,6 +371,7 @@ final class DepthModels {
 
     synchronized void shutdown() {
         closed = true;
+        pendingDiagnostics = null;
         epoch++;
         worker.execute(this::release);
         worker.shutdown();
@@ -337,33 +386,55 @@ final class DepthModels {
     private Backend load(int job, int model) throws Exception {
         if (model == 1) {
             try {
-                return new ZipLiteBackend(modelAsset(ZIP_GPU), true);
+                return new ZipLiteBackend(modelAsset(ZIP_GPU), true, true, true);
             } catch (Exception | LinkageError error) {
                 if (job != epoch || closed) throw error;
                 Log.w("AniartDepth", "ZipDepth GPU unavailable", error);
             }
         }
-        return loadCpu(model);
+        return switch (model) {
+            case 4 -> new ZipLiteBackend(modelAsset(ZIP_GPU), true, true, false);
+            case 5 -> loadCpu(1);
+            case 6 -> new ZipLiteBackend(modelAsset(ZIP_GPU), true, false, false);
+            case 7 -> loadLimbo(LIMBO_INT8);
+            default -> loadCpu(model);
+        };
     }
 
     private Backend loadCpu(int model) throws Exception {
-        if (model == 1) return new ZipLiteBackend(modelAsset(ZIP_CPU), false);
+        if (model == 1) return new ZipLiteBackend(modelAsset(ZIP_CPU), false, false, false);
+        if (model == 2) return loadLimbo(LIMBO_FILE);
         OrtEnvironment ort = OrtEnvironment.getEnvironment();
         try (var options = new OrtSession.SessionOptions()) {
             options.setIntraOpNumThreads(2);
             options.setInterOpNumThreads(1);
-            if (model == 2) {
-                File file = new File(context.getFilesDir(), LIMBO_FILE);
-                if (!validLimbo(file)) {
-                    throw new MissingWeights();
-                }
-                return new Backend(ort, options, 504, 280, true, "image", file);
-            }
             // Extended optimizations fuse the encoder's FP16 graph into com.microsoft.Gelu.
             // The ARM64 CPU provider in our Android build only has an FP32 kernel for that fusion.
             options.setOptimizationLevel(OrtSession.SessionOptions.OptLevel.BASIC_OPT);
             return new VideoBackend(ort, options, modelAsset("encoder_fp16.onnx"),
                     modelAsset("bootstrap_fp16.onnx"), modelAsset("stream_fp16.onnx"));
+        }
+    }
+
+    private boolean hasAsset(String file) throws IOException {
+        try (var ignored = context.getAssets().openFd("depth/" + file)) {
+            return true;
+        } catch (java.io.FileNotFoundException missing) {
+            return false;
+        }
+    }
+
+    private Backend loadLimbo(String asset) throws Exception {
+        var ort = OrtEnvironment.getEnvironment();
+        try (var options = new OrtSession.SessionOptions()) {
+            options.setIntraOpNumThreads(2);
+            options.setInterOpNumThreads(1);
+            if (hasAsset(asset)) {
+                return new Backend(ort, 504, 280, true, "image", ort.createSession(modelAsset(asset), options));
+            }
+            File file = new File(context.getFilesDir(), LIMBO_FILE);
+            if (!asset.equals(LIMBO_FILE) || !validLimbo(file)) throw new MissingWeights();
+            return new Backend(ort, options, 504, 280, true, "image", file);
         }
     }
 
@@ -514,17 +585,18 @@ final class DepthModels {
     }
 
     private static final class ZipLiteBackend extends Backend {
-        private final boolean gpu;
+        private final boolean gpu, widescreen;
         private final GpuDelegate delegate;
         private final Interpreter interpreter;
         private final ByteBuffer inputBuffer, outputBuffer;
 
-        ZipLiteBackend(ByteBuffer file, boolean gpu) throws Exception {
-            super(null, null, gpu ? 320 : 256, gpu ? 192 : 256, false, "image", null);
+        ZipLiteBackend(ByteBuffer file, boolean widescreen, boolean gpu, boolean allowFp16) throws Exception {
+            super(null, null, widescreen ? 320 : 256, widescreen ? 192 : 256, false, "image", null);
+            this.widescreen = widescreen;
             this.gpu = gpu;
             inputBuffer = ByteBuffer.allocateDirect(width * height * 3 * Float.BYTES).order(ByteOrder.nativeOrder());
             outputBuffer = ByteBuffer.allocateDirect(width * height * Float.BYTES).order(ByteOrder.nativeOrder());
-            delegate = gpu ? new GpuDelegate(new GpuDelegate.Options().setPrecisionLossAllowed(true)) : null;
+            delegate = gpu ? new GpuDelegate(new GpuDelegate.Options().setPrecisionLossAllowed(allowFp16)) : null;
             try {
                 var options = new Interpreter.Options().setNumThreads(2);
                 if (delegate != null) options.addDelegate(delegate);
@@ -535,7 +607,7 @@ final class DepthModels {
             }
         }
 
-        @Override int contentPadding() { return gpu ? 6 : 0; }
+        @Override int contentPadding() { return widescreen ? 6 : 0; }
 
         @Override float[] infer(byte[] rgba) {
             inputBuffer.clear();
@@ -546,7 +618,7 @@ final class DepthModels {
             outputBuffer.clear();
             var packed = outputBuffer.asFloatBuffer();
             float[] depth = new float[width * (height - 2 * contentPadding())];
-            if (!gpu) {
+            if (!widescreen) {
                 packed.get(depth);
                 return depth;
             }

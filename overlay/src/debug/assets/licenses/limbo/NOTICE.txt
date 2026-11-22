@@ -1,0 +1,6 @@
+Limbo-V3 by NevermindNilas (2026), https://github.com/NevermindNilas/Ai-models
+CC BY-NC 4.0. Derived from Depth Anything 3 SMALL (Apache-2.0) via Limbo-V2.
+See section 4 of LICENSE.md for upstream notices.
+
+The benchmark includes the unmodified FP32 export and an Aniart VR adaptation
+with dynamic 8-bit quantization of constant MatMul weights for ONNX Runtime CPU.

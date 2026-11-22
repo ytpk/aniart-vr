@@ -35,7 +35,11 @@ jobs:
           "$manager" --sdk_root="$sdk" 'platforms;android-34' 'build-tools;34.0.0' 'ndk;23.2.8568313' 'cmake;3.22.1'
           echo "ANDROID_HOME=$sdk" >> "$GITHUB_ENV"
           echo "ANDROID_SDK_ROOT=$sdk" >> "$GITHUB_ENV"
-      - name: Build APK
+      - name: Install CPU model quantization tools
+        run: python3.12 -m pip install onnxruntime==1.24.3 onnx==1.23.2 numpy==2.5.5
+      - name: Build noncommercial depth benchmark APK
+        env:
+          ANIART_DEPTH_BENCH: '1'
         run: ./build.sh
       - name: Verify packaging
         shell: bash
@@ -56,7 +60,8 @@ jobs:
               for doc in ("LICENSE.pdf", "NOTICE.txt"):
                   apk.getinfo("assets/licenses/qnn/" + doc)
               for model in ("zipdepth-wide-320x180-t320x192-edgepad-gpu.tflite", "zipdepth-base-256-cpu.tflite",
-                            "encoder_fp16.onnx", "bootstrap_fp16.onnx", "stream_fp16.onnx", "qnn-htp-probe.onnx"):
+                            "encoder_fp16.onnx", "bootstrap_fp16.onnx", "stream_fp16.onnx", "qnn-htp-probe.onnx",
+                            "LimboV3_504x280_fp32.onnx", "limbo-v3-cpu-dynamic-int8.onnx"):
                   assert apk.getinfo("assets/depth/" + model).compress_type == ZIP_STORED, model
           PY
           unzip -p "$apk" assets/chaquopy/requirements-common.imy > "$RUNNER_TEMP/aniart-requirements.zip"
@@ -68,7 +73,7 @@ jobs:
           grep -qx 'anicli_api/source/animego.pyc' "$RUNNER_TEMP/aniart-requirements.list"
       - uses: actions/upload-artifact@v4
         with:
-          name: Aniart-VR-Quest-debug
+          name: Aniart-VR-Quest-depth-benchmark-debug
           path: .build/openxr/src/tests/hello_xr/build/outputs/apk/debug/*.apk
           if-no-files-found: error
           include-hidden-files: true
