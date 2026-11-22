@@ -15,8 +15,8 @@ android {
         applicationId 'dev.aniart.vr'
         minSdk 31
         targetSdk 34
-        versionCode 11
-        versionName '0.5.2'
+        versionCode 12
+        versionName '0.5.3'
         ndk { abiFilters 'arm64-v8a' }
         externalNativeBuild {
             cmake {
@@ -42,6 +42,9 @@ chaquopy {
         pip {
             options '--no-deps'
             install '-r', 'anicli-requirements.txt'
+            // The Android lxml wheel links to these. Desktop lxml bundles them itself.
+            install 'chaquopy-libxml2==2.9.8'
+            install 'chaquopy-libxslt==1.1.32'
         }
     }
 }

@@ -48,6 +48,9 @@ jobs:
           unzip -p "$apk" assets/chaquopy/requirements-common.imy > "$RUNNER_TEMP/aniart-requirements.zip"
           unzip -Z1 "$RUNNER_TEMP/aniart-requirements.zip" > "$RUNNER_TEMP/aniart-requirements.list"
           grep -qx 'lxml/etree.so' "$RUNNER_TEMP/aniart-requirements.list"
+          grep -qx 'chaquopy/lib/libxml2.so' "$RUNNER_TEMP/aniart-requirements.list"
+          grep -qx 'chaquopy/lib/libxslt.so' "$RUNNER_TEMP/aniart-requirements.list"
+          grep -qx 'chaquopy/lib/libexslt.so' "$RUNNER_TEMP/aniart-requirements.list"
           grep -qx 'anicli_api/source/animego.pyc' "$RUNNER_TEMP/aniart-requirements.list"
       - uses: actions/upload-artifact@v4
         with:
