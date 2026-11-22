@@ -1,6 +1,8 @@
+import asyncio
 from contextlib import redirect_stdout
 from io import StringIO
 import pkgutil
+import ssl
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
@@ -21,6 +23,17 @@ class AniCliCheck(unittest.TestCase):
             with self.subTest(provider=key):
                 self.assertTrue(callable(bridge._extractor(key).search))
                 self.assertTrue(callable(bridge._extractor(key).ongoing))
+
+    def test_android_clients_load_verified_tls_without_opening_a_ca_path(self):
+        with patch.object(bridge, '_on_android', True), \
+                patch.object(bridge.certifi, 'where', side_effect=OSError('CA path unavailable')):
+            extractor = bridge._extractor.__wrapped__('anilibria')
+            self.addCleanup(extractor.http.close)
+            self.addCleanup(asyncio.run, extractor.http_async.aclose())
+            context = bridge._android_tls_context()
+        self.assertTrue(context.check_hostname)
+        self.assertEqual(context.verify_mode, ssl.CERT_REQUIRED)
+        self.assertGreater(context.cert_store_stats()['x509_ca'], 0)
 
     def test_catalog_keeps_all_voices_and_video_formats(self):
         hls = Video('m3u8', 720, 'https://stream.example/watch', {'Referer': 'https://player.example/'})

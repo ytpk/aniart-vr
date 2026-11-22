@@ -72,6 +72,7 @@ final class AniCliBrowser {
     private final LruCache<String, Bitmap> posters = new LruCache<>(32);
     private final Set<String> pending = new HashSet<>();
     private final Set<String> failed = new HashSet<>();
+    private PyObject module;
     private Screen screen;
 
     AniCliBrowser(CinemaActivity activity, Consumer<CinemaActivity.OnlineEpisode> play) {
@@ -93,8 +94,13 @@ final class AniCliBrowser {
     private PyObject bridge() {
         synchronized (Python.class) {
             if (!Python.isStarted()) Python.start(new AndroidPlatform(context));
+            if (module == null) {
+                var bridge = Python.getInstance().getModule("anicli_bridge");
+                bridge.callAttr("configure_android");
+                module = bridge;
+            }
+            return module;
         }
-        return Python.getInstance().getModule("anicli_bridge");
     }
 
     private List<Provider> providers() {

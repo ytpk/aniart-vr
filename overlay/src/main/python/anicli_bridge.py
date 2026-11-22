@@ -5,14 +5,17 @@ from importlib import import_module
 from collections import defaultdict
 from contextvars import ContextVar
 from decimal import Decimal, InvalidOperation
+from pathlib import PurePath
 import re
 import socket
 import ssl
+import traceback
 import warnings
 from urllib.parse import urljoin, urlsplit
 
-from anicli_api._http import HTTPSync, HTTPRetryConnectSyncTransport
+from anicli_api._http import HTTPAsync, HTTPSync, HTTPRetryConnectSyncTransport
 from anicli_api._logger import logger
+import certifi
 import httpx
 
 
@@ -68,6 +71,18 @@ class CatalogError(Exception):
 
 
 _request_error = ContextVar("request_error", default=None)
+_on_android = False
+
+
+def configure_android():
+    global _on_android
+    _on_android = True
+
+
+@lru_cache(maxsize=1)
+def _android_tls_context():
+    # Load the trusted roots in memory so OpenSSL never opens an APK resource path.
+    return ssl.create_default_context(cadata=certifi.contents())
 
 
 def _error_reason(error):
@@ -132,7 +147,11 @@ def _run(call, *args):
     except httpx.RequestError as error:
         raise CatalogError(_error_reason(error)) from None
     except Exception as error:
-        print(f"AniCli extractor failed {type(error).__name__}", flush=True)
+        frames = list(traceback.walk_tb(error.__traceback__))[-7:]
+        location = " > ".join(f"{PurePath(frame.f_code.co_filename).name}:{line}:{frame.f_code.co_name}"
+                              for frame, line in frames)
+        errno = f" errno={error.errno}" if isinstance(error, OSError) else ""
+        print(f"AniCli extractor failed {type(error).__name__}{errno} at {location}", flush=True)
         failure = _request_error.get()
         if failure:
             raise CatalogError(failure) from None
@@ -146,6 +165,12 @@ def _extractor(provider):
     if provider not in dict(PROVIDERS):
         raise ValueError("Unknown provider")
     module = import_module(f"anicli_api.source.{provider}")
+    if _on_android:
+        context = _android_tls_context()
+        return module.Extractor(
+            http_client=CatalogClient(timeout=6.0, verify=context, trust_env=False),
+            http_async_client=HTTPAsync(timeout=6.0, verify=context, trust_env=False),
+        )
     return module.Extractor(http_client=CatalogClient(timeout=6.0))
 
 
