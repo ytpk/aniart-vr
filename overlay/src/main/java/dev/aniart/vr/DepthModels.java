@@ -21,9 +21,12 @@ import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.Executors;
+import java.util.concurrent.Callable;
 import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Consumer;
 import java.util.function.IntConsumer;
 import org.tensorflow.lite.Interpreter;
 import org.tensorflow.lite.gpu.GpuDelegate;
@@ -42,6 +45,7 @@ final class DepthModels {
 
     private final Context context;
     private final ExecutorService worker = Executors.newSingleThreadExecutor();
+    private final AtomicBoolean checking = new AtomicBoolean();
     private volatile int epoch;
     private volatile int selected;
     private volatile boolean busy, closed, failed;
@@ -79,7 +83,88 @@ final class DepthModels {
         if (reload && model == 0 && !closed) worker.execute(this::release);
     }
 
-    boolean wantsFrame() { return selected != 0 && !busy && !failed && !closed; }
+    boolean wantsFrame() { return selected != 0 && !busy && !failed && !closed && !checking.get(); }
+
+    synchronized void runDiagnostics(String renderer, Consumer<String> report) {
+        if (closed || !checking.compareAndSet(false, true)) return;
+        report.accept("Диагностика 3D…");
+        worker.execute(() -> {
+            Log.i("AniartDepth", "Diagnostics begin | " + renderer
+                    + " | Android " + android.os.Build.VERSION.SDK_INT
+                    + " | " + android.os.Build.MODEL + " | ABI " + Arrays.toString(android.os.Build.SUPPORTED_ABIS)
+                    + " | CPU logical cores " + Runtime.getRuntime().availableProcessors());
+            try {
+                // The production interpreter and the diagnostic delegate share this thread.
+                release();
+                byte[] rgba = new byte[CAPTURE_W * CAPTURE_H * 4];
+                for (int y = 0; y < CAPTURE_H; y++) {
+                    for (int x = 0; x < CAPTURE_W; x++) {
+                        int at = (y * CAPTURE_W + x) * 4;
+                        rgba[at] = (byte) x;
+                        rgba[at + 1] = (byte) (255 * y / CAPTURE_H);
+                        rgba[at + 2] = (byte) (255 - x);
+                        rgba[at + 3] = (byte) 255;
+                    }
+                }
+                int passed = checkBackend("ZipDepth GPU", () -> new ZipLiteBackend(modelAsset(ZIP_GPU), true), rgba, 1);
+                passed += checkBackend("ZipDepth CPU", () -> loadCpu(1), rgba, 1);
+                try {
+                    Log.i("AniartDepth", "ONNX Runtime providers " + OrtEnvironment.getAvailableProviders());
+                } catch (RuntimeException | LinkageError error) {
+                    Log.w("AniartDepth", "ONNX Runtime provider query failed", error);
+                }
+                passed += checkBackend("Video Depth Anything CPU", () -> loadCpu(3), rgba, 2);
+                String limbo;
+                if (new File(context.getFilesDir(), LIMBO_FILE).isFile()) {
+                    limbo = checkBackend("Limbo V3 CPU", () -> loadCpu(2), rgba, 1) == 1 ? "OK" : "ошибка";
+                } else {
+                    limbo = "нет файла";
+                    Log.i("AniartDepth", "Limbo V3 CPU skipped: weights not installed");
+                }
+                report.accept("Проверок пройдено " + passed + "/3 · Limbo: " + limbo);
+            } catch (Exception | LinkageError error) {
+                Log.w("AniartDepth", "Diagnostics failed", error);
+                report.accept("Ошибка диагностики. См. AniartDepth");
+            } finally {
+                // The next live frame must be calculated by the freshly loaded backend.
+                previousEpoch = -1;
+                Log.i("AniartDepth", "Diagnostics end");
+                checking.set(false);
+            }
+        });
+    }
+
+    private int checkBackend(String name, Callable<Backend> open, byte[] frame, int passes) {
+        Backend test = null;
+        try {
+            long start = System.nanoTime();
+            test = open.call();
+            Log.i("AniartDepth", name + " initialized in " + (System.nanoTime() - start) / 1_000_000 + " ms");
+            for (int pass = 1; pass <= passes; pass++) {
+                start = System.nanoTime();
+                float[] depth = test.infer(frame);
+                int finite = 0;
+                for (float value : depth) if (Float.isFinite(value)) finite++;
+                if (finite != depth.length || finite != test.width * (test.height - 2 * test.contentPadding())) {
+                    throw new IOException("Unexpected depth output: " + depth.length + " values, " + finite + " finite");
+                }
+                Log.i("AniartDepth", name + " pass " + pass + ": "
+                        + (System.nanoTime() - start) / 1_000_000 + " ms, " + finite + " values");
+            }
+            return 1;
+        } catch (Exception | LinkageError error) {
+            Log.w("AniartDepth", name + " diagnostic failed", error);
+            return 0;
+        } finally {
+            if (test != null) {
+                try {
+                    test.close();
+                } catch (RuntimeException | LinkageError error) {
+                    Log.w("AniartDepth", name + " diagnostic cleanup failed", error);
+                }
+            }
+        }
+    }
 
     byte[] takeMap() {
         var frame = result.getAndSet(null);
@@ -156,7 +241,7 @@ final class DepthModels {
         if (job == epoch && !closed) status = text;
     }
 
-    void shutdown() {
+    synchronized void shutdown() {
         closed = true;
         epoch++;
         worker.execute(this::release);

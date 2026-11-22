@@ -601,6 +601,12 @@ final class CinemaPanel {
             settingsChanged();
         });
         text("Стерео", 32, 291, 36, INK, 600, true);
+        button("Диагностика 3D", 560, 246, 344, 52, false, () -> activity.testDepth(
+                GLES20.glGetString(GLES20.GL_VENDOR) + " | " + GLES20.glGetString(GLES20.GL_RENDERER)
+                + " | " + GLES20.glGetString(GLES20.GL_VERSION)
+                + String.format(Locale.ROOT, " | FPS %.1f | Display %.1f Hz | Anime4K GPU %.2f ms"
+                        + " | Eye MSAA %b | Stereo %d | Video %s",
+                        fps, displayHz, gpuMs, eyeMsaa, stereo, frameSize())));
         button(dehalo ? "Dehalo: вкл." : "Dehalo: выкл.", 918, 246, 330, 52, dehalo, () -> {
             dehalo = !dehalo;
             settingsChanged();

@@ -117,6 +117,12 @@ Media3 выводит декодированные кадры в `SurfaceTexture
 - **Limbo V3 504×280.** Экспериментальный покадровый ONNX на CPU. Нажмите «Скачать» для загрузки с GitHub автора. Для ручного импорта выберите «Файл Limbo» и укажите оригинальный `LimboV3_504x280_fp32.onnx`, полученный на условиях автора модели. [TheAnimeScripter](https://github.com/NevermindNilas/TheAnimeScripter/releases/tag/v3.1.0)
 - **Video Depth Anything Small 266×154.** Потоковый ONNX на CPU с кэшем предыдущих кадров. Все три графа входят в APK. [Экспорт и лицензия Apache 2.0](https://huggingface.co/EmreGneri/video-depth-anything-small-stream)
 
+Подключите Quest по ADB и запустите команду ниже. В настройках приложения нажмите **Диагностика 3D** и дождитесь строки `Diagnostics end`. Кнопка проверяет ZipDepth отдельно на GPU и CPU, оба этапа Video Depth Anything и Limbo при наличии весов. Для проверки используется синтетический кадр, поэтому открывать видео не требуется.
+
+```sh
+adb logcat -v threadtime -T 1 -s AniartDepth tflite LiteRT linker AndroidRuntime > aniart-depth-check.txt
+```
+
 Веса ZipDepth и Video Depth Anything скачиваются при сборке и проверяются по SHA-256. Если на Quest нет файлового менеджера для импорта Limbo, в debug-сборке можно загрузить файл через ADB и снова выбрать Limbo V3:
 
 ```sh
