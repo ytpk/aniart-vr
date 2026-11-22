@@ -97,9 +97,10 @@ void main() {
     vec2 p = uv;
     if (shift != 0.0) {
         float mask = smoothstep(0.0, .06, min(uv.x, 1.0 - uv.x));
-        p.x += shift * (texture(depthMap, uv).r - .5) * mask;
+        float disparity = clamp((texture(depthMap, uv).r - .5) * 1.65, -.45, .45);
+        p.x += shift * disparity * mask;
     }
-    if (operation == 2 && abs(uv.x - .5) < .0008) {
+    if (operation == 2 && abs(uv.x - .5) < .0016) {
         color = vec4(.87, .81, 1, 1);
     } else if (operation == 1 || (operation == 2 && uv.x > .5)) {
         color = vec4(texture(enhanced, p).rgb, 1);
@@ -119,7 +120,9 @@ void main() {
 
     GLuint oes = 0, panel = 0, vao = 0, fbo = 0, video = 0, flat = 0, beam = 0;
     GLuint textures[7]{}, passes[5]{}, depth = 0;
+    enum class FilterStatus { Off, Active, Waiting, TooLarge, Unavailable };
     bool depthReady = false;
+    FilterStatus filterStatus = FilterStatus::Off;
     int filteredLayout = -1;
     int sourceW = 0, sourceH = 0;
     int allocatedW = 0, allocatedH = 0, allocatedEyes = 0;
@@ -340,7 +343,7 @@ public:
         jmethodID open = env->GetMethodID(cls, "openTexture", "(I)V");
         close = env->GetMethodID(cls, "closeTexture", "()V");
         latch = env->GetMethodID(cls, "latch", "([F)J");
-        upload = env->GetMethodID(cls, "uploadPanel", "(FFZFF)V");
+        upload = env->GetMethodID(cls, "uploadPanel", "(FFIIIZFF)V");
         readConfig = env->GetMethodID(cls, "renderConfig", "()I");
         click = env->GetMethodID(cls, "clickPanel", "(FF)V");
         commandMethod = env->GetMethodID(cls, "command", "(I)V");
@@ -397,7 +400,8 @@ public:
         glActiveTexture(GL_TEXTURE0);
         glBindTexture(GL_TEXTURE_2D, panel);
         env->CallVoidMethod(activity, upload, pointer.hit ? pointer.u : -1.0f, pointer.hit ? pointer.v : -1.0f,
-                            jboolean(filtered), fps, filtered ? gpuMs : -1.0f);
+                            jint(filterStatus), jint(sourceW), jint(sourceH), jboolean(depthReady), fps,
+                            filtered ? gpuMs : -1.0f);
     }
 
     void PrepareFrame() {
@@ -408,7 +412,6 @@ public:
             fps = frames / elapsed;
             frames = 0;
             last = now;
-
         }
         if (queryPending) {
             GLuint available = 0;
@@ -447,11 +450,13 @@ public:
         const bool stereo = layout != 0;
         const int w = sourceW / (layout == 1 ? 2 : 1);
         const int h = sourceH / (layout == 2 ? 2 : 1);
-        const bool enhance = fast && canFilter && (!filtered || filteredLayout != layout || newFrame)
-                             && w > 1 && h > 1 && w <= 1920 && h <= 1080
-                             && (!stereo || w*h <= 1280*720);
-        const bool mapDepth = parallax && sourceW > 0 && (newFrame || !depthReady);
-        if (!fast || (stereo && w*h > 1280*720)) filtered = false;
+        const bool hasFrame = w > 1 && h > 1;
+        const bool supported = hasFrame && w <= 1920 && h <= 1080 &&
+                               (!stereo || w * h <= 1280 * 720);
+        const bool enhance = fast && canFilter && supported &&
+                             (!filtered || filteredLayout != layout || newFrame);
+        const bool mapDepth = parallax && hasFrame && (newFrame || !depthReady);
+        if (!fast || !supported || filteredLayout != layout) filtered = false;
         if (!parallax) depthReady = false;
         const bool measure = enhance && query && !queryPending;
         if (measure) beginQuery(GL_TIME_ELAPSED_EXT, query);
@@ -460,6 +465,10 @@ public:
             endQuery(GL_TIME_ELAPSED_EXT);
             queryPending = true;
         }
+        filterStatus = !fast ? FilterStatus::Off
+                     : !hasFrame ? FilterStatus::Waiting
+                     : !supported ? FilterStatus::TooLarge
+                     : filtered ? FilterStatus::Active : FilterStatus::Unavailable;
         if (config & 7) UpdatePanel();
     }
 

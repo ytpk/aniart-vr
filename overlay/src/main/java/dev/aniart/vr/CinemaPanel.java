@@ -56,7 +56,9 @@ final class CinemaPanel {
     private int hovered = -1;
     private boolean dirty = true, allocated;
     private float fps, gpuMs = -1;
-    private boolean enhanced;
+    private int filterStatus, frameWidth, frameHeight;
+    private boolean depthReady;
+    private Catalog.Episode lastShared;
     private long lastRender, lastUse;
 
     CinemaPanel(CinemaActivity activity, SharedPreferences preferences) {
@@ -71,6 +73,19 @@ final class CinemaPanel {
     }
 
     int renderConfig() {
+        var shared = activity.sharedEpisode();
+        if (shared != lastShared) {
+            lastShared = shared;
+            if (shared != null) {
+                show(LIBRARY);
+                keyboard = false;
+                details = Catalog.group(List.of(shared)).get(0);
+                section = shared.episode();
+                sectionsPage = variantsPage = 0;
+                buttons.clear();
+                dirty = true;
+            }
+        }
         var state = activity.snapshot();
         if (state.episode() != currentEpisode) {
             currentEpisode = state.episode();
@@ -82,7 +97,7 @@ final class CinemaPanel {
         if (page == HIDDEN && !state.status().isEmpty() && !state.playing() && currentEpisode != null) {
             show(WATCH);
         }
-        if (page == WATCH && hovered < 0 && state.playing() && state.status().isEmpty()
+        if (page == WATCH && !comparison && hovered < 0 && state.playing() && state.status().isEmpty()
                 && SystemClock.uptimeMillis() - lastUse > 11000) {
             show(HIDDEN);
         }
@@ -179,7 +194,8 @@ final class CinemaPanel {
         return -1;
     }
 
-    void upload(float x, float y, boolean enhanced, float fps, float gpuMs) {
+    void upload(float x, float y, int filterStatus, int width, int height,
+                boolean depthReady, float fps, float gpuMs) {
         if (page == HIDDEN) return;
         var catalog = activity.catalog();
         var state = activity.snapshot();
@@ -200,7 +216,8 @@ final class CinemaPanel {
             lastCatalog = catalog;
             dirty = true;
         }
-        if (!notice.equals(lastNotice) || this.enhanced != enhanced) dirty = true;
+        if (!notice.equals(lastNotice) || this.filterStatus != filterStatus || frameWidth != width
+                || frameHeight != height || this.depthReady != depthReady) dirty = true;
         if (page == WATCH && (!state.equals(lastSnapshot) || now - lastRender >= 2000)) dirty = true;
         if (page == SETTINGS && now - lastRender >= 700) dirty = true;
         if (!dirty) return;
@@ -208,7 +225,10 @@ final class CinemaPanel {
         lastNotice = notice;
         lastSnapshot = state;
         lastRender = now;
-        this.enhanced = enhanced;
+        this.filterStatus = filterStatus;
+        frameWidth = width;
+        frameHeight = height;
+        this.depthReady = depthReady;
         this.gpuMs = gpuMs;
         this.fps = fps;
         int h = page == WATCH ? WATCH_HEIGHT : FULL_HEIGHT;
@@ -392,15 +412,27 @@ final class CinemaPanel {
 
     private void watch(CinemaActivity.Snapshot state) {
         var episode = state.episode();
-        text(episode == null ? "Загрузка" : episode.title() + "  ·  " + episode.episode(), 32, 48, 30, INK, 915, true);
+        text(episode == null ? "Загрузка" : episode.title() + "  ·  " + episode.episode(), 32, 48, 30, INK, 775, true);
+        button(stereo == 0 ? "2D → 3D" : stereoLabel(), 824, 16, 162, 56, stereo != 0, () -> {
+            if (stereo == 0) {
+                if (depth == 0) {
+                    depth = 4;
+                    settingsChanged();
+                }
+                changeStereo(3);
+            } else if (stereo == 3) {
+                changeStereo(0);
+            } else {
+                show(SETTINGS);
+            }
+        });
         button("A/B", 1002, 16, 148, 56, comparison, this::toggleComparison);
         button("×", 1166, 16, 82, 56, false, () -> show(HIDDEN));
         String status = state.status();
         if (episode != null && status.isEmpty()) status = episode.variant();
         text(status, 32, 79, 20, MUTED, 800, false);
-        String picture = (enhanced ? (comparison ? "Оригинал  |  Anime4K" : "Anime4K") :
-                fast ? "Исходное изображение" : "Оригинал") + "  ·  " + stereoLabel();
-        text(picture, 855, 111, 18, ACCENT, 393, false);
+        String picture = frameSize() + "  ·  " + filterLabel() + "  ·  " + stereoStatus();
+        text(picture, 332, 111, 20, ACCENT, 916, false);
         text(time(state.position()) + " / " + time(state.duration()), 32, 111, 20, MUTED, 320, false);
         if (state.seekable() && state.duration() > 0) {
             float amount = (float) state.position() / state.duration();
@@ -429,7 +461,7 @@ final class CinemaPanel {
             settingsChanged();
         });
         button(comparison ? "A/B: вкл." : "A/B: выкл.", 320, 173, 250, 62, comparison, this::toggleComparison);
-        text(comparison ? "Слева оригинал, справа Anime4K" : "Anime4K CNN x2 S", 590, 213, 24, MUTED, 656, false);
+        text(frameSize() + "  ·  " + filterLabel(), 590, 213, 24, MUTED, 656, false);
         text("Стерео", 32, 291, 36, INK, 600, true);
         String[] options = {"2D", "SBS · рядом", "OU · сверху/снизу", "Псевдо-3D"};
         for (int i = 0; i < options.length; i++) {
@@ -471,10 +503,32 @@ final class CinemaPanel {
         button("Импорт каталога", 808, 521, 440, 60, false, activity::pickCatalog);
         text(notice.isEmpty() ? "Левый стик перемещает экран при просмотре" : notice, 32, 621, 23, MUTED, 1216, false);
         String stats = String.format(Locale.ROOT, "%.0f FPS", fps);
-        if (enhanced && gpuMs >= 0) stats += String.format(Locale.ROOT, "  ·  GPU %.1f мс", gpuMs);
-        if (fast && !enhanced) stats += "  ·  Anime4K ожидает совместимый кадр";
+        if (filterStatus == 1 && gpuMs >= 0) stats += String.format(Locale.ROOT, "  ·  GPU %.1f мс", gpuMs);
+        stats += "  ·  " + stereoStatus();
         text(stats, 32, 704, 23, ACCENT, 940, false);
         if (activity.snapshot().episode() != null) button("К просмотру", 1012, 655, 236, 66, true, () -> show(WATCH));
+    }
+
+    private String frameSize() {
+        return frameWidth > 0 ? frameWidth + "×" + frameHeight : "Нет кадра";
+    }
+
+    private String filterLabel() {
+        return switch (filterStatus) {
+            case 1 -> comparison ? "Слева оригинал / справа Anime4K" : "Anime4K ×2";
+            case 2 -> "Anime4K: ожидание кадра";
+            case 3 -> "Anime4K: кадр выше лимита";
+            case 4 -> "Anime4K: GPU недоступен";
+            default -> "Оригинал";
+        };
+    }
+
+    private String stereoStatus() {
+        if (stereo == 3) {
+            if (depth == 0) return "Псевдо-3D: глубина 0";
+            return depthReady ? "Псевдо-3D " + depth + "/10" : "Псевдо-3D: ожидание карты";
+        }
+        return stereoLabel();
     }
 
     private String stereoLabel() {

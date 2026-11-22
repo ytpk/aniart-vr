@@ -1,5 +1,5 @@
 diff --git a/src/tests/hello_xr/AndroidManifest.xml b/src/tests/hello_xr/AndroidManifest.xml
-index 2b50370..953c177 100644
+index 2b50370..7ed2c7c 100644
 --- a/src/tests/hello_xr/AndroidManifest.xml
 +++ b/src/tests/hello_xr/AndroidManifest.xml
 @@ -16,11 +16,12 @@
@@ -40,6 +40,24 @@ index 2b50370..953c177 100644
        android:configChanges="screenSize|screenLayout|orientation|keyboardHidden|keyboard|navigation|uiMode|density"
        android:excludeFromRecents="false"
        android:launchMode="singleTask"
+@@ -70,6 +71,17 @@
+         <category android:name="android.intent.category.LAUNCHER" />
+         <category android:name="org.khronos.openxr.intent.category.IMMERSIVE_HMD" />
+       </intent-filter>
++      <intent-filter>
++        <action android:name="android.intent.action.VIEW" />
++        <category android:name="android.intent.category.DEFAULT" />
++        <data android:scheme="https" android:host="*" android:pathSuffix=".m3u8" />
++        <data android:scheme="https" android:host="*" android:pathSuffix=".mp4" />
++      </intent-filter>
++      <intent-filter>
++        <action android:name="android.intent.action.SEND" />
++        <category android:name="android.intent.category.DEFAULT" />
++        <data android:mimeType="text/plain" />
++      </intent-filter>
+     </activity>
+   </application>
+ </manifest>
 diff --git a/src/tests/hello_xr/CMakeLists.txt b/src/tests/hello_xr/CMakeLists.txt
 index 93e708c..1c7558d 100644
 --- a/src/tests/hello_xr/CMakeLists.txt

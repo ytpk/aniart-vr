@@ -4,6 +4,7 @@ import android.app.NativeActivity;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.graphics.SurfaceTexture;
+import android.net.Uri;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
@@ -26,6 +27,8 @@ import java.io.File;
 import java.io.FileOutputStream;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
+import java.util.Map;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -36,6 +39,7 @@ public final class CinemaActivity extends NativeActivity {
     private final AtomicInteger generation = new AtomicInteger();
     private volatile List<Catalog.Series> catalog = List.of();
     private List<Catalog.Episode> demos = List.of();
+    private volatile Catalog.Episode sharedEpisode;
     private volatile String notice = "";
     private volatile Snapshot snapshot = new Snapshot(null, "Выберите видео", 0, 0, false, false, 1f, 1f);
     private volatile long format;
@@ -48,6 +52,7 @@ public final class CinemaActivity extends NativeActivity {
     private float speed;
     private ExoPlayer player;
     private Catalog.Episode playing;
+    private boolean playingShared;
     private String status = "";
     private SurfaceTexture texture;
     private Surface surface;
@@ -90,9 +95,42 @@ public final class CinemaActivity extends NativeActivity {
             notice = "Ошибка загрузки каталога";
             Log.w("AniartVR", notice, error);
         }
+        acceptVideoLink(getIntent());
         panel = new CinemaPanel(this, preferences);
         publish();
         super.onCreate(state);
+    }
+
+    @Override protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        acceptVideoLink(intent);
+    }
+
+    private void acceptVideoLink(Intent intent) {
+        if (intent == null) return;
+        String raw;
+        if (Intent.ACTION_VIEW.equals(intent.getAction())) {
+            raw = intent.getDataString();
+        } else if (Intent.ACTION_SEND.equals(intent.getAction())) {
+            CharSequence value = intent.getCharSequenceExtra(Intent.EXTRA_TEXT);
+            raw = value == null ? null : value.toString().trim();
+        } else {
+            return;
+        }
+        if (raw != null && raw.length() <= 8192 && raw.chars().noneMatch(Character::isWhitespace)) {
+            Uri uri = Uri.parse(raw);
+            String path = uri.getPath();
+            if ("https".equals(uri.getScheme()) && uri.getHost() != null && uri.getUserInfo() == null && path != null) {
+                String lower = path.toLowerCase(Locale.ROOT);
+                boolean hls = lower.endsWith(".m3u8");
+                if (hls || lower.endsWith(".mp4")) {
+                    sharedEpisode = new Catalog.Episode("Открытая ссылка", uri.getHost(), "Оригинал",
+                            hls ? "HLS" : "MP4", uri, hls, Map.of(), 0);
+                    return;
+                }
+            }
+        }
+        notice = "Нужна прямая HTTPS-ссылка на .m3u8 или .mp4";
     }
 
     @Override protected void onResume() {
@@ -112,9 +150,10 @@ public final class CinemaActivity extends NativeActivity {
     }
 
     List<Catalog.Series> catalog() { return catalog; }
+    Catalog.Episode sharedEpisode() { return sharedEpisode; }
     Snapshot snapshot() { return snapshot; }
     String notice() { return notice; }
-    long positionFor(Catalog.Episode episode) { return preferences.getLong("resume:" + episode.key(), 0); }
+    long positionFor(Catalog.Episode episode) { return episode == sharedEpisode ? 0 : preferences.getLong("resume:" + episode.key(), 0); }
 
     // Called only on the OpenXR GL thread.
     public void openTexture(int name) {
@@ -155,8 +194,9 @@ public final class CinemaActivity extends NativeActivity {
     public int renderConfig() { return panel.renderConfig(); }
     public void command(int command) { panel.command(command); }
     public void clickPanel(float x, float y) { panel.click(x, y); }
-    public void uploadPanel(float x, float y, boolean enhanced, float fps, float gpuMs) {
-        panel.upload(x, y, enhanced, fps, gpuMs);
+    public void uploadPanel(float x, float y, int filterStatus, int width, int height,
+                            boolean depthReady, float fps, float gpuMs) {
+        panel.upload(x, y, filterStatus, width, height, depthReady, fps, gpuMs);
     }
 
     void open(Catalog.Episode episode) { ui.post(() -> play(episode, true)); }
@@ -228,7 +268,8 @@ public final class CinemaActivity extends NativeActivity {
     }
 
     private void savePosition() {
-        if (player == null || playing == null || !player.isCurrentMediaItemSeekable()) return;
+        if (player == null || playing == null || playingShared
+                || !player.isCurrentMediaItemSeekable()) return;
         long position = player.getCurrentPosition();
         long duration = player.getDuration();
         long resume = duration > 0 && duration - position <= 5000 ? 0 : position;
@@ -245,6 +286,7 @@ public final class CinemaActivity extends NativeActivity {
         format = 0;
         generation.incrementAndGet();
         playing = null;
+        playingShared = false;
         playRequested = false;
     }
 
@@ -274,6 +316,7 @@ public final class CinemaActivity extends NativeActivity {
         ExoPlayer active = new ExoPlayer.Builder(this).setMediaSourceFactory(new DefaultMediaSourceFactory(data)).build();
         player = active;
         playing = episode;
+        playingShared = episode == sharedEpisode;
         playRequested = true;
         status = "Загрузка";
         active.setAudioAttributes(new AudioAttributes.Builder().setUsage(C.USAGE_MEDIA)
