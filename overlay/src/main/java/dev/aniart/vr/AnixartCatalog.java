@@ -22,6 +22,17 @@ final class AnixartCatalog {
     record Episode(long position, String name, String url) {}
     record Link(String url, boolean hls, boolean embedded) {}
 
+    @FunctionalInterface
+    interface Transport {
+        JSONObject request(String path, JSONObject payload) throws Exception;
+    }
+
+    private final Transport transport;
+
+    AnixartCatalog() { this(AnixartCatalog::httpRequest); }
+
+    AnixartCatalog(Transport transport) { this.transport = transport; }
+
     List<Title> titles(String query, int page) throws Exception {
         JSONObject data = query.isEmpty()
                 ? request("discover/watching/" + page, null)
@@ -120,7 +131,13 @@ final class AnixartCatalog {
         return value.isEmpty() ? fallback : value;
     }
 
-    private static JSONObject request(String path, JSONObject payload) throws Exception {
+    private JSONObject request(String path, JSONObject payload) throws Exception {
+        JSONObject data = transport.request(path, payload);
+        if (data.optInt("code", -1) != 0) throw new IOException("Anixart вернул ошибку");
+        return data;
+    }
+
+    private static JSONObject httpRequest(String path, JSONObject payload) throws Exception {
         HttpURLConnection connection = (HttpURLConnection) new URL(HOST + path).openConnection();
         connection.setConnectTimeout(6000);
         connection.setReadTimeout(8000);
@@ -140,9 +157,7 @@ final class AnixartCatalog {
             int status = connection.getResponseCode();
             if (status != 200) throw new IOException("Anixart HTTP " + status);
             try (InputStream input = connection.getInputStream()) {
-                JSONObject data = new JSONObject(new String(read(input, MAX_RESPONSE), StandardCharsets.UTF_8));
-                if (data.optInt("code", -1) != 0) throw new IOException("Anixart вернул ошибку");
-                return data;
+                return new JSONObject(new String(read(input, MAX_RESPONSE), StandardCharsets.UTF_8));
             }
         } finally {
             connection.disconnect();

@@ -45,6 +45,7 @@ final class AnixartBrowser {
     private final CinemaActivity activity;
     private final Consumer<Catalog.Episode> play;
     private final AnixartCatalog api = new AnixartCatalog();
+    private final AnixartPlayback playback = new AnixartPlayback(api, new KodikStreams()::resolve);
     private final ExecutorService network = Executors.newFixedThreadPool(2);
     private final ExecutorService images = Executors.newFixedThreadPool(2);
     private final ConcurrentLinkedQueue<Runnable> updates = new ConcurrentLinkedQueue<>();
@@ -137,8 +138,6 @@ final class AnixartBrowser {
         });
     }
 
-    private record Playback(AnixartCatalog.Link link, List<KodikStreams.Stream> streams, String status) {}
-
     private void episodeLink(AnixartCatalog.Title title, AnixartCatalog.Option voice,
                              AnixartCatalog.Option source, AnixartCatalog.Episode episode) {
         Screen next = push(title.name(), episode.name() + "  ·  " + voice.name() + "  ·  " + source.name());
@@ -147,20 +146,7 @@ final class AnixartBrowser {
 
     private void loadEpisode(Screen next, AnixartCatalog.Title title, AnixartCatalog.Option voice,
                              AnixartCatalog.Option source, AnixartCatalog.Episode episode) {
-        load(next, () -> {
-            var link = api.resolve(title, source, episode);
-            if (!link.embedded()) return new Playback(link, List.of(), "");
-            if (!KodikStreams.isEmbed(link.url())) return new Playback(link, List.of(), "Источник предоставляет веб-плеер");
-            try {
-                return new Playback(link, new KodikStreams().resolve(link.url()), "");
-            } catch (java.io.IOException error) {
-                String message = error.getMessage();
-                return new Playback(link, List.of(), message != null && message.startsWith("Kodik")
-                        ? message : "Не удалось получить поток Kodik");
-            } catch (Exception error) {
-                return new Playback(link, List.of(), "Не удалось прочитать потоки Kodik");
-            }
-        }, result -> {
+        load(next, () -> playback.resolve(title, source, episode), result -> {
             var link = result.link();
             if (!link.embedded()) {
                 next.rows = List.of(new Row("Смотреть в VR", () -> play.accept(new Catalog.Episode(title.name(),
