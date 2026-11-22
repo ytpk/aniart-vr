@@ -9,6 +9,8 @@ import java.io.File;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.net.HttpURLConnection;
+import java.net.URI;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.FloatBuffer;
@@ -22,11 +24,15 @@ import java.util.Map;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.IntConsumer;
 import org.tensorflow.lite.Interpreter;
 import org.tensorflow.lite.gpu.GpuDelegate;
 
 final class DepthModels {
     static final String LIMBO_FILE = "LimboV3_504x280_fp32.onnx";
+    private static final long LIMBO_SIZE = 100449120;
+    private static final String LIMBO_URL =
+            "https://github.com/NevermindNilas/TAS-Models-Host/releases/download/main/" + LIMBO_FILE;
     static final int CAPTURE_W = 256, CAPTURE_H = 144, MAP_W = 192, MAP_H = 108;
     private static final String ZIP_GPU = "zipdepth-wide-320x180-t320x192-edgepad-gpu.tflite";
     private static final String ZIP_CPU = "zipdepth-base-256-cpu.tflite";
@@ -170,7 +176,7 @@ final class DepthModels {
             options.setInterOpNumThreads(1);
             if (model == 2) {
                 File file = new File(context.getFilesDir(), LIMBO_FILE);
-                if (!file.isFile() || file.length() != 100449120 || !LIMBO_HASH.equals(sha256(file))) {
+                if (!validLimbo(file)) {
                     throw new MissingWeights();
                 }
                 return new Backend(ort, options, 504, 280, true, "image", file);
@@ -189,20 +195,52 @@ final class DepthModels {
     }
 
     private static final class MissingWeights extends IOException {}
+
+    private static boolean validLimbo(File file) throws Exception {
+        return file.isFile() && file.length() == LIMBO_SIZE && LIMBO_HASH.equals(sha256(file));
+    }
+
+    void downloadLimbo(IntConsumer progress) throws Exception {
+        if (validLimbo(new File(context.getFilesDir(), LIMBO_FILE))) return;
+        var connection = (HttpURLConnection) URI.create(LIMBO_URL).toURL().openConnection();
+        connection.setConnectTimeout(15000);
+        connection.setReadTimeout(15000);
+        try {
+            int code = connection.getResponseCode();
+            if (code != 200) throw new IOException("GitHub HTTP " + code);
+            try (var input = connection.getInputStream()) {
+                installLimbo(input, progress);
+            }
+        } finally {
+            connection.disconnect();
+        }
+    }
+
     void importLimbo(InputStream input) throws Exception {
+        installLimbo(input, ignored -> {});
+    }
+
+    private void installLimbo(InputStream input, IntConsumer progress) throws Exception {
         File file = new File(context.getFilesDir(), LIMBO_FILE);
         File temp = File.createTempFile("limbo", ".onnx", context.getFilesDir());
         try {
             try (var output = new FileOutputStream(temp)) {
                 byte[] buffer = new byte[65536];
                 long total = 0;
+                int lastPercent = -1;
                 for (int count; (count = input.read(buffer)) != -1;) {
+                    if (closed) throw new IOException("Player closed");
                     total += count;
-                    if (total > 100449120) throw new MissingWeights();
+                    if (total > LIMBO_SIZE) throw new MissingWeights();
                     output.write(buffer, 0, count);
+                    int percent = (int) (100 * total / LIMBO_SIZE);
+                    if (percent != lastPercent) {
+                        progress.accept(percent);
+                        lastPercent = percent;
+                    }
                 }
             }
-            if (temp.length() != 100449120 || !LIMBO_HASH.equals(sha256(temp))) throw new MissingWeights();
+            if (!validLimbo(temp)) throw new MissingWeights();
             Files.move(temp.toPath(), file.toPath(), java.nio.file.StandardCopyOption.REPLACE_EXISTING);
         } finally {
             Files.deleteIfExists(temp.toPath());

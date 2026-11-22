@@ -45,6 +45,7 @@ public final class CinemaActivity extends NativeActivity {
     private DepthModels depthModels;
     private final Handler ui = new Handler(Looper.getMainLooper());
     private final AtomicBoolean frame = new AtomicBoolean();
+    private final AtomicBoolean limboDownloading = new AtomicBoolean();
     private final AtomicInteger generation = new AtomicInteger();
     private volatile List<Catalog.Series> catalog = List.of();
     private List<Catalog.Episode> demos = List.of();
@@ -524,6 +525,23 @@ public final class CinemaActivity extends NativeActivity {
 
     void pickLimbo() {
         pickFile(IMPORT_LIMBO, "Загрузите " + DepthModels.LIMBO_FILE + " через ADB");
+    }
+
+    void downloadLimbo() {
+        if (!limboDownloading.compareAndSet(false, true)) return;
+        notice = "Подключение к GitHub…";
+        new Thread(() -> {
+            try {
+                depthModels.downloadLimbo(percent -> notice = "Загрузка Limbo V3 · " + percent + "%");
+                generation.incrementAndGet();
+                notice = "Limbo V3 готов";
+            } catch (Exception error) {
+                notice = "Не удалось загрузить Limbo V3. Повторите или выберите файл";
+                Log.w("AniartDepth", "Download Limbo V3", error);
+            } finally {
+                limboDownloading.set(false);
+            }
+        }, "Limbo model download").start();
     }
 
     private void pickFile(int request, String errorText) {

@@ -621,11 +621,14 @@ final class CinemaPanel {
                 depth = Math.min(10, depth + 1);
                 settingsChanged();
             });
-            button(DepthModels.label(depthModel) + "  ›", 716, 385, depthModel == 2 ? 354 : 532, 58, true, () -> {
+            button(DepthModels.label(depthModel) + "  ›", 716, 385, depthModel == 2 ? 181 : 532, 58, true, () -> {
                 depthModel = (depthModel + 1) % 4;
                 settingsChanged();
             });
-            if (depthModel == 2) button("Файл Limbo", 1080, 385, 168, 58, false, activity::pickLimbo);
+            if (depthModel == 2) {
+                button("Скачать", 907, 385, 161, 58, false, activity::downloadLimbo);
+                button("Файл Limbo", 1080, 385, 168, 58, false, activity::pickLimbo);
+            }
         }
         text("Экран и просмотр", 32, 500, 36, INK, 680, true);
         String[] sizes = {"Малый", "Средний", "Большой"};

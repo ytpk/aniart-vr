@@ -109,7 +109,7 @@ Media3 выводит декодированные кадры в `SurfaceTexture
 #### Тест моделей глубины
 
 - **ZipDepth.** В APK включены Widescreen 320×180 для GPU и квантованный LiteRT 256×256 для резервного CPU. [Веса и лицензия MIT](https://github.com/tB0nE/nightfall/releases/tag/edgepad-models-2026-10-08)
-- **Limbo V3 504×280.** Экспериментальный покадровый ONNX на CPU. Выберите «Файл Limbo» и укажите оригинальный `LimboV3_504x280_fp32.onnx`, полученный на условиях автора модели. [TheAnimeScripter](https://github.com/NevermindNilas/TheAnimeScripter/releases/tag/v3.1.0)
+- **Limbo V3 504×280.** Экспериментальный покадровый ONNX на CPU. Нажмите «Скачать» для загрузки с GitHub автора. Для ручного импорта выберите «Файл Limbo» и укажите оригинальный `LimboV3_504x280_fp32.onnx`, полученный на условиях автора модели. [TheAnimeScripter](https://github.com/NevermindNilas/TheAnimeScripter/releases/tag/v3.1.0)
 - **Video Depth Anything Small 266×154.** Потоковый ONNX на CPU с кэшем предыдущих кадров. Все три графа входят в APK. [Экспорт и лицензия Apache 2.0](https://huggingface.co/EmreGneri/video-depth-anything-small-stream)
 
 Веса ZipDepth и Video Depth Anything скачиваются при сборке и проверяются по SHA-256. Если на Quest нет файлового менеджера для импорта Limbo, в debug-сборке можно загрузить файл через ADB и снова выбрать Limbo V3:
