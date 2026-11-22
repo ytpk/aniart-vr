@@ -54,6 +54,8 @@ final class CinemaPanel {
     private boolean favoritesOnly, keyboard, cyrillic = true;
     private String search = "";
     private int stereo, depth, screenSize;
+    private int depthModel;
+    private String depthStatus = "";
     private boolean fast, comparison, reverse, autoNext, roomSound;
     private int hovered = -1;
     private boolean dirty = true, allocated;
@@ -72,6 +74,7 @@ final class CinemaPanel {
         comparison = preferences.getBoolean("comparison", false);
         reverse = preferences.getBoolean("reverse_eyes", false);
         depth = Math.max(0, Math.min(10, preferences.getInt("depth", 4)));
+        depthModel = Math.max(0, Math.min(3, preferences.getInt("depth_model", 1)));
         screenSize = Math.max(0, Math.min(2, preferences.getInt("screen_size", 1)));
         autoNext = preferences.getBoolean("auto_next", true);
         roomSound = preferences.getBoolean("room_sound", false);
@@ -81,6 +84,11 @@ final class CinemaPanel {
 
     int renderConfig() {
         if (anicli.pump()) dirty = true;
+        String modelStatus = activity.depthStatus();
+        if (!modelStatus.equals(depthStatus)) {
+            depthStatus = modelStatus;
+            dirty = true;
+        }
         var shared = activity.sharedEpisode();
         if (shared != lastShared) {
             lastShared = shared;
@@ -112,7 +120,8 @@ final class CinemaPanel {
             show(HIDDEN);
         }
         return page | (fast ? 8 : 0) | (comparison ? 16 : 0) | (stereo << 5)
-                | (reverse ? 256 : 0) | (depth << 9) | (screenSize << 13) | (roomSound ? 1 << 15 : 0);
+                | (reverse ? 256 : 0) | (depth << 9) | (screenSize << 13) | (roomSound ? 1 << 15 : 0)
+                | (depthModel << 16);
     }
 
     private void changeStereo(int mode) {
@@ -130,7 +139,7 @@ final class CinemaPanel {
     private void settingsChanged() {
         preferences.edit().putBoolean("anime4k", fast).putBoolean("comparison", comparison)
                 .putBoolean("reverse_eyes", reverse).putBoolean("auto_next", autoNext)
-                .putInt("depth", depth).putInt("screen_size", screenSize).apply();
+                .putInt("depth", depth).putInt("depth_model", depthModel).putInt("screen_size", screenSize).apply();
         dirty = true;
     }
 
@@ -570,7 +579,7 @@ final class CinemaPanel {
         button(comparison ? "A/B: вкл." : "A/B: выкл.", 320, 173, 250, 62, comparison, this::toggleComparison);
         text(frameSize() + "  ·  " + filterLabel(), 590, 213, 24, MUTED, 656, false);
         text("Стерео", 32, 291, 36, INK, 600, true);
-        String[] options = {"2D", "SBS · рядом", "OU · сверху/снизу", "Псевдо-3D"};
+        String[] options = {"2D", "SBS · рядом", "OU · сверху/снизу", "2D → 3D"};
         for (int i = 0; i < options.length; i++) {
             int value = i;
             button(options[i], 32 + i * 306, 308, 290, 62, stereo == i, () -> changeStereo(value));
@@ -591,7 +600,11 @@ final class CinemaPanel {
                 depth = Math.min(10, depth + 1);
                 settingsChanged();
             });
-            text("Глубина по яркости и положению", 716, 422, 22, MUTED, 532, false);
+            button(DepthModels.label(depthModel) + "  ›", 716, 385, depthModel == 2 ? 354 : 532, 58, true, () -> {
+                depthModel = (depthModel + 1) % 4;
+                settingsChanged();
+            });
+            if (depthModel == 2) button("Файл Limbo", 1080, 385, 168, 58, false, activity::pickLimbo);
         }
         text("Экран и просмотр", 32, 500, 36, INK, 680, true);
         String[] sizes = {"Малый", "Средний", "Большой"};
@@ -648,13 +661,15 @@ final class CinemaPanel {
     private String stereoStatus() {
         if (stereo == 3) {
             if (depth == 0) return "Псевдо-3D: глубина 0";
-            return depthReady ? "Псевдо-3D " + depth + "/10" : "Псевдо-3D: ожидание карты";
+            String model = DepthModels.label(depthModel);
+            if (depthModel != 0 && !depthStatus.isEmpty()) return model + "  ·  " + depthStatus;
+            return depthReady ? model + " " + depth + "/10" : model + ": ожидание карты";
         }
         return stereoLabel();
     }
 
     private String stereoLabel() {
-        return switch (stereo) { case 1 -> "SBS"; case 2 -> "OU"; case 3 -> "Псевдо-3D"; default -> "2D"; };
+        return switch (stereo) { case 1 -> "SBS"; case 2 -> "OU"; case 3 -> "2D → 3D"; default -> "2D"; };
     }
 
     private void pageButtons(int page, int count, int size, float x, float y, float w,

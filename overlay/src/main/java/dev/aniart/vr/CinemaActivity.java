@@ -41,6 +41,8 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 public final class CinemaActivity extends NativeActivity {
     private static final int IMPORT_CATALOG = 42;
+    private static final int IMPORT_LIMBO = 43;
+    private DepthModels depthModels;
     private final Handler ui = new Handler(Looper.getMainLooper());
     private final AtomicBoolean frame = new AtomicBoolean();
     private final AtomicInteger generation = new AtomicInteger();
@@ -86,6 +88,7 @@ public final class CinemaActivity extends NativeActivity {
     };
 
     @Override public void onCreate(Bundle state) {
+        depthModels = new DepthModels(getApplicationContext());
         preferences = getSharedPreferences("cinema", MODE_PRIVATE);
         autoNext = preferences.getBoolean("auto_next", true);
         roomSound = preferences.getBoolean("room_sound", false);
@@ -183,6 +186,7 @@ public final class CinemaActivity extends NativeActivity {
     @Override protected void onDestroy() {
         super.onDestroy();
         panel.shutdown();
+        depthModels.shutdown();
         onlineEpisode = null;
         onlinePlayback.shutdownNow();
     }
@@ -230,6 +234,11 @@ public final class CinemaActivity extends NativeActivity {
     }
 
     public int renderConfig() { return panel.renderConfig(); }
+    public void selectDepthModel(int model) { depthModels.select(model); }
+    public boolean wantsDepthFrame() { return depthModels.wantsFrame(); }
+    public void submitDepthFrame(byte[] rgba) { depthModels.submit(rgba); }
+    public byte[] takeDepthMap() { return depthModels.takeMap(); }
+    String depthStatus() { return depthModels.status(); }
     public void setHeadYaw(float yaw) { headYaw = yaw; }
     int roomInputChannels() { return roomInputChannels; }
 
@@ -362,6 +371,7 @@ public final class CinemaActivity extends NativeActivity {
 
     private void seekTo(long position) {
         if (player != null && player.isCurrentMediaItemSeekable()) {
+            generation.incrementAndGet();
             player.seekTo(Math.max(0, Math.min(position, player.getDuration())));
             publish();
         }
@@ -509,22 +519,44 @@ public final class CinemaActivity extends NativeActivity {
     }
 
     void pickCatalog() {
+        pickFile(IMPORT_CATALOG, "Нет файлового менеджера. Загрузите catalog.json через ADB");
+    }
+
+    void pickLimbo() {
+        pickFile(IMPORT_LIMBO, "Загрузите " + DepthModels.LIMBO_FILE + " через ADB");
+    }
+
+    private void pickFile(int request, String errorText) {
         ui.post(() -> {
             try {
                 Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
                 intent.setType("*/*");
                 intent.addCategory(Intent.CATEGORY_OPENABLE);
-                startActivityForResult(intent, IMPORT_CATALOG);
+                startActivityForResult(intent, request);
             } catch (RuntimeException error) {
-                notice = "Нет файлового менеджера. Загрузите catalog.json через ADB";
+                notice = errorText;
             }
         });
     }
 
     @Override protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
-        if (requestCode != IMPORT_CATALOG || resultCode != RESULT_OK || data == null || data.getData() == null) return;
+        if (resultCode != RESULT_OK || data == null || data.getData() == null) return;
         var uri = data.getData();
+        if (requestCode == IMPORT_LIMBO) {
+            new Thread(() -> {
+                try (var stream = getContentResolver().openInputStream(uri)) {
+                    depthModels.importLimbo(stream);
+                    generation.incrementAndGet();
+                    notice = "Limbo V3 импортирован";
+                } catch (Exception error) {
+                    notice = "Нужен оригинал " + DepthModels.LIMBO_FILE;
+                    Log.w("AniartDepth", "Import Limbo model", error);
+                }
+            }, "Depth model import").start();
+            return;
+        }
+        if (requestCode != IMPORT_CATALOG) return;
         new Thread(() -> {
             try (var stream = getContentResolver().openInputStream(uri)) {
                 byte[] bytes = Catalog.Json.read(stream);

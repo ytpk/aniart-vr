@@ -2,6 +2,7 @@
 #pragma once
 #include <jni.h>
 #include <EGL/egl.h>
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -127,6 +128,14 @@ void main() {
     jmethodID headYaw = nullptr;
     GLuint oes = 0, panel = 0, vao = 0, fbo = 0, video = 0, flat = 0, beam = 0;
     GLuint textures[7]{}, passes[5]{}, depth = 0;
+    static constexpr int depthCaptureW = 256, depthCaptureH = 144;
+    GLuint depthCapture = 0;
+    int depthModel = -1;
+    jmethodID selectDepth = nullptr, wantsDepth = nullptr, submitDepth = nullptr, takeDepth = nullptr;
+    jbyteArray depthInput = nullptr;
+    std::array<jbyte, depthCaptureW * depthCaptureH * 4> depthPixels{};
+    std::array<jbyte, 192 * 108> depthValues{};
+    std::chrono::steady_clock::time_point lastDepth{};
     enum class FilterStatus { Off, Active, Waiting, TooLarge, Unavailable };
     bool depthReady = false;
     FilterStatus filterStatus = FilterStatus::Off;
@@ -215,7 +224,7 @@ void main() {
         glBindTexture(GL_TEXTURE_EXTERNAL_OES, oes);
     }
 
-    void Process(bool enhance, bool mapDepth) {
+    void Process(bool enhance, bool mapDepth, bool captureDepth) {
         XrMatrix4x4f identity;
         XrMatrix4x4f_CreateIdentity(&identity);
         glBindFramebuffer(GL_FRAMEBUFFER, fbo);
@@ -228,6 +237,13 @@ void main() {
                 UseVideo(identity, 0, 0, 3, 0);
                 glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
             }
+        }
+        if (captureDepth && Target(depthCapture, depthCaptureW, depthCaptureH)) {
+            UseVideo(identity, 0, 0, 0, 0);
+            glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+            glReadPixels(0, 0, depthCaptureW, depthCaptureH, GL_RGBA, GL_UNSIGNED_BYTE, depthPixels.data());
+            env->SetByteArrayRegion(depthInput, 0, depthPixels.size(), depthPixels.data());
+            env->CallVoidMethod(activity, submitDepth, depthInput);
         }
         if (!enhance) return;
         filtered = false;
@@ -355,10 +371,17 @@ public:
         click = env->GetMethodID(cls, "clickPanel", "(FF)V");
         headYaw = env->GetMethodID(cls, "setHeadYaw", "(F)V");
         commandMethod = env->GetMethodID(cls, "command", "(I)V");
+        selectDepth = env->GetMethodID(cls, "selectDepthModel", "(I)V");
+        wantsDepth = env->GetMethodID(cls, "wantsDepthFrame", "()Z");
+        submitDepth = env->GetMethodID(cls, "submitDepthFrame", "([B)V");
+        takeDepth = env->GetMethodID(cls, "takeDepthMap", "()[B");
         env->DeleteLocalRef(cls);
         auto array = env->NewFloatArray(16);
         transformArray = static_cast<jfloatArray>(env->NewGlobalRef(array));
         env->DeleteLocalRef(array);
+        auto input = env->NewByteArray(depthPixels.size());
+        depthInput = static_cast<jbyteArray>(env->NewGlobalRef(input));
+        env->DeleteLocalRef(input);
         room.Open();
         glGenVertexArrays(1, &vao);
         glGenFramebuffers(1, &fbo);
@@ -366,10 +389,13 @@ public:
         glGenTextures(1, &panel);
         glGenTextures(7, textures);
         glGenTextures(1, &depth);
+        glGenTextures(1, &depthCapture);
         Texture(GL_TEXTURE_EXTERNAL_OES, oes, GL_LINEAR);
         Texture(GL_TEXTURE_2D, panel, GL_LINEAR);
         Texture(GL_TEXTURE_2D, depth, GL_LINEAR);
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 192, 108, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_R8, 192, 108, 0, GL_RED, GL_UNSIGNED_BYTE, nullptr);
+        Texture(GL_TEXTURE_2D, depthCapture, GL_LINEAR);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, depthCaptureW, depthCaptureH, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
         video = Program(vertex, externalImage);
         glUseProgram(video);
         glUniform1i(glGetUniformLocation(video, "enhanced"), 1);
@@ -455,6 +481,13 @@ public:
         }
         const bool fast = config & 8;
         const bool parallax = ((config >> 5) & 7) == 3;
+        const int newModel = parallax ? (config >> 16) & 3 : 0;
+        if (depthModel != newModel || format < 0) {
+            depthModel = newModel;
+            depthReady = false;
+            lastDepth = {};
+            env->CallVoidMethod(activity, selectDepth, depthModel);
+        }
         const int layout = Layout();
         const bool stereo = layout != 0;
         const int w = sourceW / (layout == 1 ? 2 : 1);
@@ -464,12 +497,30 @@ public:
                                (!stereo || w * h <= 1280 * 720);
         const bool enhance = fast && canFilter && supported &&
                              (!filtered || filteredLayout != layout || newFrame);
-        const bool mapDepth = parallax && hasFrame && (newFrame || !depthReady);
+        const bool mapDepth = parallax && depthModel == 0 && hasFrame && (newFrame || !depthReady);
+        bool captureDepth = false;
+        if (depthModel != 0 && hasFrame) {
+            auto map = static_cast<jbyteArray>(env->CallObjectMethod(activity, takeDepth));
+            if (map) {
+                if (env->GetArrayLength(map) == depthValues.size()) {
+                    env->GetByteArrayRegion(map, 0, depthValues.size(), depthValues.data());
+                    glActiveTexture(GL_TEXTURE0);
+                    glBindTexture(GL_TEXTURE_2D, depth);
+                    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 192, 108, GL_RED, GL_UNSIGNED_BYTE, depthValues.data());
+                    depthReady = true;
+                }
+                env->DeleteLocalRef(map);
+            }
+            captureDepth = (newFrame || lastDepth.time_since_epoch().count() == 0)
+                           && now - lastDepth >= std::chrono::milliseconds(125)
+                           && env->CallBooleanMethod(activity, wantsDepth);
+            if (captureDepth) lastDepth = now;
+        }
         if (!fast || !supported || filteredLayout != layout) filtered = false;
         if (!parallax) depthReady = false;
         const bool measure = enhance && query && !queryPending;
         if (measure) beginQuery(GL_TIME_ELAPSED_EXT, query);
-        if (enhance || mapDepth) Process(enhance, mapDepth);
+        if (enhance || mapDepth || captureDepth) Process(enhance, mapDepth, captureDepth);
         if (measure) {
             endQuery(GL_TIME_ELAPSED_EXT);
             queryPending = true;
@@ -527,6 +578,7 @@ public:
         room.Close();
         if (opened) env->CallVoidMethod(activity, close);
         if (transformArray) env->DeleteGlobalRef(transformArray);
+        if (depthInput) env->DeleteGlobalRef(depthInput);
         if (query) deleteQuery(1, &query);
         for (auto program : passes) glDeleteProgram(program);
         commandMethod = nullptr;
@@ -537,6 +589,7 @@ public:
         glDeleteTextures(1, &panel);
         glDeleteTextures(7, textures);
         glDeleteTextures(1, &depth);
+        glDeleteTextures(1, &depthCapture);
         glDeleteFramebuffers(1, &fbo);
         glDeleteVertexArrays(1, &vao);
     }
