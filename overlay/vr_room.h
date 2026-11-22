@@ -1,11 +1,13 @@
 #pragma once
+#include <algorithm>
+#include <cmath>
 #include <cstddef>
 #include <vector>
 
 namespace Cinema {
 
 class Room {
-    struct Vertex { XrVector3f position, color; float material; };
+    struct Vertex { XrVector3f position, color, normal; float material; };
     GLuint program = 0, vao = 0, buffer = 0;
     GLsizei count = 0;
 
@@ -13,13 +15,36 @@ class Room {
 layout(location=0) in vec3 position;
 layout(location=1) in vec3 tint;
 layout(location=2) in float material;
+layout(location=3) in vec3 normal;
+uniform int darkMode, hasLight;
+uniform sampler2D screenLight;
+uniform vec4 screenRect;
 uniform mat4 vp;
 out vec3 world;
 out vec3 color;
 flat out float surfaceType;
+vec3 spill(vec2 uv, vec3 normal) {
+    vec3 point = vec3(screenRect.xy + (uv-.5)*screenRect.zw, -5.10);
+    vec3 offset = position - point;
+    float distance2 = dot(offset,offset) + .4;
+    vec3 ray = offset * inversesqrt(distance2);
+    float weight = max(0.0,ray.z) * abs(dot(normal,ray)) / distance2;
+    vec3 rgb = textureLod(screenLight, uv, 0.0).rgb;
+    return rgb*rgb * weight;
+}
 void main() {
     world = position;
     color = tint;
+    if (darkMode != 0) {
+        color *= material > 2.5 ? .023 : .11;
+        if (hasLight != 0 && material < 2.5) {
+            vec3 reflected = vec3(0.0);
+            for (int y = 0; y < 2; ++y)
+                for (int x = 0; x < 3; ++x)
+                    reflected += spill((vec2(x,y)+.5)/vec2(3,2), normal);
+            color += .26 * sqrt(reflected) * (.8 + 2.0 * tint);
+        }
+    }
     surfaceType = material;
     gl_Position = vp * vec4(position, 1.0);
 }
@@ -30,33 +55,14 @@ in vec3 world;
 in vec3 color;
 flat in float surfaceType;
 out vec4 outColor;
-uniform int darkMode, hasLight;
-uniform sampler2D screenLight;
-uniform vec4 screenRect;
-vec3 spill(vec2 uv, vec3 normal) {
-    vec3 point = vec3(screenRect.xy + (uv-.5)*screenRect.zw, -5.10);
-    vec3 offset = world - point;
-    float distance2 = dot(offset,offset) + .4;
-    vec3 ray = offset * inversesqrt(distance2);
-    float weight = max(0.0,ray.z) * abs(dot(normal,ray)) / distance2;
-    vec3 rgb = texture(screenLight, uv).rgb;
-    return rgb*rgb * weight;
-}
+uniform int darkMode;
 float grain(vec3 p) {
     vec3 cell = fract(floor(p) * vec3(.1031, .1137, .1379));
     return fract(dot(cell, cell.yzx + 19.19));
 }
 void main() {
     if (darkMode != 0) {
-        vec3 shaded = color * (surfaceType > 2.5 ? .023 : .11);
-        if (hasLight != 0 && surfaceType < 2.5) {
-            vec3 n = cross(dFdx(world), dFdy(world));
-            n *= inversesqrt(max(dot(n,n), 1e-12));
-            vec3 reflected = spill(vec2(.25,.25),n) + spill(vec2(.75,.25),n)
-                           + spill(vec2(.25,.75),n) + spill(vec2(.75,.75),n);
-            shaded += .32 * sqrt(reflected) * (.8 + 2.0 * color);
-        }
-        outColor = vec4(shaded, 1);
+        outColor = vec4(color, 1);
         return;
     }
     if (surfaceType > 2.5) {
@@ -82,10 +88,30 @@ void main() {
     struct Mesh {
         std::vector<Vertex> vertices;
 
+        static XrVector3f mix(XrVector3f a, XrVector3f b, float t) {
+            return {a.x+(b.x-a.x)*t, a.y+(b.y-a.y)*t, a.z+(b.z-a.z)*t};
+        }
+
+        static float length(XrVector3f p) { return std::sqrt(p.x*p.x + p.y*p.y + p.z*p.z); }
+
         void face(XrVector3f a, XrVector3f b, XrVector3f c, XrVector3f d,
                   XrVector3f color, float material = 0, float light = 1) {
             const XrVector3f shade{color.x * light, color.y * light, color.z * light};
-            for (auto point : {a, b, c, a, c, d}) vertices.push_back({point, shade, material});
+            const XrVector3f u{b.x-a.x,b.y-a.y,b.z-a.z}, v{c.x-a.x,c.y-a.y,c.z-a.z};
+            XrVector3f normal{u.y*v.z-u.z*v.y, u.z*v.x-u.x*v.z, u.x*v.y-u.y*v.x};
+            float n = length(normal);
+            if (n > .00001f) normal = {normal.x/n, normal.y/n, normal.z/n};
+            const int cols = material > 2.5 ? 1 : std::max(1, int(std::ceil(length(u) / .9f)));
+            const int rows = material > 2.5 ? 1 : std::max(1, int(std::ceil(length({d.x-a.x,d.y-a.y,d.z-a.z}) / .9f)));
+            const auto point = [&](int x, int y) {
+                return mix(mix(a,b,float(x)/cols), mix(d,c,float(x)/cols), float(y)/rows);
+            };
+            for (int y = 0; y < rows; ++y)
+                for (int x = 0; x < cols; ++x) {
+                    const auto p = point(x,y), q = point(x+1,y);
+                    const auto r = point(x+1,y+1), t = point(x,y+1);
+                    for (auto vertex : {p,q,r,p,r,t}) vertices.push_back({vertex, shade, normal, material});
+                }
         }
 
         void box(float x, float y, float z, float w, float h, float d, XrVector3f color, float material = 0) {
@@ -174,7 +200,8 @@ public:
         glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), nullptr);
         glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), reinterpret_cast<void*>(offsetof(Vertex,color)));
         glVertexAttribPointer(2, 1, GL_FLOAT, GL_FALSE, sizeof(Vertex), reinterpret_cast<void*>(offsetof(Vertex,material)));
-        for (GLuint i = 0; i < 3; ++i) glEnableVertexAttribArray(i);
+        glVertexAttribPointer(3, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), reinterpret_cast<const GLfloat*>(offsetof(Vertex,normal)));
+        for (GLuint i = 0; i < 4; ++i) glEnableVertexAttribArray(i);
         count = static_cast<GLsizei>(mesh.vertices.size());
     }
 

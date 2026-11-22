@@ -124,9 +124,11 @@ vec3 finishPicture(vec2 p, bool sharpened) {
 void main() {
     if (operation == 4) {
         vec3 sum = vec3(0.0);
-        for (int y=0;y<4;++y) for (int x=0;x<4;++x)
-            sum += source(uv + (vec2(x,y)-1.5)*vec2(1.0/32.0,1.0/16.0));
-        color = vec4(sum/16.0, 1);
+        for (int y=0;y<4;++y) for (int x=0;x<4;++x) {
+            vec3 rgb = source(uv + (vec2(x,y)-1.5)*vec2(1.0/12.0,1.0/8.0));
+            sum += rgb * rgb;
+        }
+        color = vec4(sqrt(sum/16.0), 1);
         return;
     }
     if (operation == 3) {
@@ -286,7 +288,7 @@ void main() {
         glDisable(GL_DEPTH_TEST);
         glDisable(GL_CULL_FACE);
         glBindVertexArray(vao);
-        if (updateLight && Target(screenLight, 8, 4)) {
+        if (updateLight && Target(screenLight, 3, 2)) {
             UseVideo(identity, Layout(), 0, 4, 0);
             if (lightReady) {
                 glEnable(GL_BLEND);
@@ -487,7 +489,7 @@ public:
         Texture(GL_TEXTURE_2D, depthCapture, GL_LINEAR);
         glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, depthCaptureW, depthCaptureH, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
         Texture(GL_TEXTURE_2D, screenLight, GL_LINEAR);
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 8, 4, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 3, 2, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
         video = Program(vertex, externalImage);
         glUseProgram(video);
         glUniform1i(glGetUniformLocation(video, "enhanced"), 1);
