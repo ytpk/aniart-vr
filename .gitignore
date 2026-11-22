@@ -1,0 +1,3 @@
+.build/
+catalog.local.json
+*.apk

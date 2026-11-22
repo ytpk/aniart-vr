@@ -1,0 +1,41 @@
+plugins {
+    id 'com.android.application' version '8.1.4'
+}
+android {
+    namespace 'dev.aniart.vr'
+    compileSdk 34
+    buildToolsVersion '34.0.0'
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+    ndkVersion '23.2.8568313'
+    defaultConfig {
+        applicationId 'dev.aniart.vr'
+        minSdk 31
+        targetSdk 34
+        versionCode 1
+        versionName '0.1.0'
+        ndk { abiFilters 'arm64-v8a' }
+        externalNativeBuild {
+            cmake {
+                arguments '-DBUILD_API_LAYERS=OFF', '-DBUILD_TESTS=ON', '-DBUILD_LOADER=ON',
+                    '-DBUILD_CONFORMANCE_TESTS=OFF', '-DBUILD_ALL_EXTENSIONS=ON',
+                    '-DHELLOXR_DEFAULT_GRAPHICS_PLUGIN=OpenGLES'
+                targets 'openxr_loader', 'hello_xr'
+                cppFlags '-std=c++17'
+            }
+        }
+    }
+    sourceSets.main.manifest.srcFile 'AndroidManifest.xml'
+    externalNativeBuild {
+        cmake {
+            path '../../../CMakeLists.txt'
+            version '3.22.1'
+        }
+    }
+}
+dependencies {
+    implementation 'androidx.media3:media3-exoplayer:1.4.1'
+    implementation 'androidx.media3:media3-exoplayer-hls:1.4.1'
+}

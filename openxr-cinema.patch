@@ -1,0 +1,291 @@
+diff --git a/src/tests/hello_xr/AndroidManifest.xml b/src/tests/hello_xr/AndroidManifest.xml
+index 2b50370..953c177 100644
+--- a/src/tests/hello_xr/AndroidManifest.xml
++++ b/src/tests/hello_xr/AndroidManifest.xml
+@@ -16,11 +16,12 @@
+   <!-- Tell the system this app works in either 3dof or 6dof mode -->
+   <uses-feature
+     android:name="android.hardware.vr.headtracking"
+-    android:required="false"
++    android:required="true"
+     android:version="1" />
+ 
+   <!-- Recommended for haptic feedback -->
+   <uses-permission android:name="android.permission.VIBRATE" />
++  <uses-permission android:name="android.permission.INTERNET" />
+ 
+   <!-- If building externally with the OpenXR loader AAR, this would be merged in automatically. -->
+   <uses-permission android:name="org.khronos.openxr.permission.OPENXR" />
+@@ -41,17 +42,17 @@
+   <!-- end of elements normally merged from the OpenXR loader AAR -->
+ 
+   <application
+-    android:allowBackup="true"
+-    android:hasCode="false"
+-    android:icon="@mipmap/ic_helloxr_launcher"
+-    android:label="@string/app_name"
+-    android:roundIcon="@mipmap/ic_helloxr_launcher">
++    android:allowBackup="false"
++    android:usesCleartextTraffic="false"
++    android:label="Aniart VR">
++
++    <meta-data android:name="com.oculus.supportedDevices" android:value="quest3|quest3s" />
+ 
+     <!-- The activity is the built-in NativeActivity framework class. -->
+     <!-- launchMode is set to singleTask because there should never be multiple copies of the app running. -->
+     <!-- Theme.Black.NoTitleBar.Fullscreen gives solid black instead of a (bad stereoscopic) gradient on app transition. -->
+     <activity
+-      android:name="android.app.NativeActivity"
++      android:name="dev.aniart.vr.CinemaActivity"
+       android:configChanges="screenSize|screenLayout|orientation|keyboardHidden|keyboard|navigation|uiMode|density"
+       android:excludeFromRecents="false"
+       android:launchMode="singleTask"
+diff --git a/src/tests/hello_xr/graphicsplugin_opengles.cpp b/src/tests/hello_xr/graphicsplugin_opengles.cpp
+index d5249e6..b4c9b99 100644
+--- a/src/tests/hello_xr/graphicsplugin_opengles.cpp
++++ b/src/tests/hello_xr/graphicsplugin_opengles.cpp
+@@ -12,6 +12,9 @@
+ 
+ #include "common/gfxwrapper_opengl.h"
+ #include <common/xr_linear.h>
++#ifdef XR_USE_PLATFORM_ANDROID
++#include "cinema.h"
++#endif
+ 
+ namespace {
+ 
+@@ -52,6 +55,9 @@ struct OpenGLESGraphicsPlugin : public IGraphicsPlugin {
+     OpenGLESGraphicsPlugin& operator=(OpenGLESGraphicsPlugin&&) = delete;
+ 
+     ~OpenGLESGraphicsPlugin() override {
++#ifdef XR_USE_PLATFORM_ANDROID
++        m_cinema.Close();
++#endif
+         if (m_swapchainFramebuffer != 0) {
+             glDeleteFramebuffers(1, &m_swapchainFramebuffer);
+         }
+@@ -135,6 +141,9 @@ struct OpenGLESGraphicsPlugin : public IGraphicsPlugin {
+             this);
+ 
+         InitializeResources();
++#ifdef XR_USE_PLATFORM_ANDROID
++        m_cinema.Open();
++#endif
+     }
+ 
+     void InitializeResources() {
+@@ -278,6 +287,12 @@ struct OpenGLESGraphicsPlugin : public IGraphicsPlugin {
+         CHECK(layerView.subImage.imageArrayIndex == 0);  // Texture arrays not supported.
+         UNUSED_PARM(swapchainFormat);                    // Not used in this function for now.
+ 
++#ifdef XR_USE_PLATFORM_ANDROID
++        if (m_cinemaFrame != Cinema::renderFrame) {
++            m_cinemaFrame = Cinema::renderFrame;
++            m_cinema.PrepareFrame();
++        }
++#endif
+         glBindFramebuffer(GL_FRAMEBUFFER, m_swapchainFramebuffer);
+ 
+         const uint32_t colorTexture = reinterpret_cast<const XrSwapchainImageOpenGLESKHR*>(swapchainImage)->image;
+@@ -315,6 +330,10 @@ struct OpenGLESGraphicsPlugin : public IGraphicsPlugin {
+         XrMatrix4x4f vp;
+         XrMatrix4x4f_Multiply(&vp, &proj, &view);
+ 
++#ifdef XR_USE_PLATFORM_ANDROID
++        UNUSED_PARM(cubes);
++        m_cinema.Draw(vp);
++#else
+         // Set cube primitive data.
+         glBindVertexArray(m_vao);
+ 
+@@ -331,6 +350,7 @@ struct OpenGLESGraphicsPlugin : public IGraphicsPlugin {
+             glDrawElements(GL_TRIANGLES, static_cast<GLsizei>(ArraySize(Geometry::c_cubeIndices)), GL_UNSIGNED_SHORT, nullptr);
+         }
+ 
++#endif
+         glBindVertexArray(0);
+         glUseProgram(0);
+         glBindFramebuffer(GL_FRAMEBUFFER, 0);
+@@ -342,6 +362,8 @@ struct OpenGLESGraphicsPlugin : public IGraphicsPlugin {
+ 
+    private:
+ #ifdef XR_USE_PLATFORM_ANDROID
++    Cinema::Screen m_cinema;
++    uint64_t m_cinemaFrame = 0;
+     XrGraphicsBindingOpenGLESAndroidKHR m_graphicsBinding{XR_TYPE_GRAPHICS_BINDING_OPENGL_ES_ANDROID_KHR};
+ #endif
+ 
+diff --git a/src/tests/hello_xr/main.cpp b/src/tests/hello_xr/main.cpp
+index 9a97444..c497e91 100644
+--- a/src/tests/hello_xr/main.cpp
++++ b/src/tests/hello_xr/main.cpp
+@@ -3,6 +3,9 @@
+ // SPDX-License-Identifier: Apache-2.0
+ 
+ #include "pch.h"
++#ifdef XR_USE_PLATFORM_ANDROID
++#include "cinema_input.h"
++#endif
+ #include "common.h"
+ #include "options.h"
+ #include "platformdata.h"
+@@ -198,15 +201,16 @@ void android_main(struct android_app* app) {
+         JNIEnv* Env;
+         app->activity->vm->AttachCurrentThread(&Env, nullptr);
+ 
++        Cinema::env = Env;
++        Cinema::activity = app->activity->clazz;
+         AndroidAppState appState = {};
+ 
+         app->userData = &appState;
+         app->onAppCmd = app_handle_cmd;
+ 
+         std::shared_ptr<Options> options = std::make_shared<Options>();
+-        if (!UpdateOptionsFromSystemProperties(*options)) {
+-            return;
+-        }
++        UpdateOptionsFromSystemProperties(*options);
++        options->GraphicsPlugin = "OpenGLES";
+ 
+         std::shared_ptr<PlatformData> data = std::make_shared<PlatformData>();
+         data->applicationVM = app->activity->vm;
+@@ -280,12 +284,13 @@ void android_main(struct android_app* app) {
+             program->RenderFrame();
+         }
+ 
+-        app->activity->vm->DetachCurrentThread();
++
+     } catch (const std::exception& ex) {
+         Log::Write(Log::Level::Error, ex.what());
+     } catch (...) {
+         Log::Write(Log::Level::Error, "Unknown Error");
+     }
++    app->activity->vm->DetachCurrentThread();
+ }
+ #else
+ int main(int argc, char* argv[]) {
+diff --git a/src/tests/hello_xr/openxr_program.cpp b/src/tests/hello_xr/openxr_program.cpp
+index c65099b..526bb6e 100644
+--- a/src/tests/hello_xr/openxr_program.cpp
++++ b/src/tests/hello_xr/openxr_program.cpp
+@@ -4,6 +4,9 @@
+ 
+ #include "openxr/openxr.h"
+ #include "pch.h"
++#ifdef XR_USE_PLATFORM_ANDROID
++#include "cinema_input.h"
++#endif
+ #include "common.h"
+ #include "options.h"
+ #include "platformdata.h"
+@@ -329,6 +332,12 @@ struct OpenXrProgram : IOpenXrProgram {
+     }
+ 
+     struct InputState {
++#ifdef XR_USE_PLATFORM_ANDROID
++        XrAction cinemaButtons[4]{};
++        XrAction moveScreen{XR_NULL_HANDLE};
++        std::chrono::steady_clock::time_point lastInput = std::chrono::steady_clock::now();
++        bool triggerDown[2]{};
++#endif
+         XrActionSet actionSet{XR_NULL_HANDLE};
+         XrAction grabAction{XR_NULL_HANDLE};
+         XrAction poseAction{XR_NULL_HANDLE};
+@@ -392,6 +401,22 @@ struct OpenXrProgram : IOpenXrProgram {
+             CHECK_XRCMD(xrCreateAction(m_input.actionSet, &actionInfo, &m_input.quitAction));
+         }
+ 
++#ifdef XR_USE_PLATFORM_ANDROID
++        const char* actionNames[] = {"play_pause", "upscaling", "catalog", "screen_size"};
++        const char* labels[] = {"Play or pause", "Anime4K", "Catalog", "Screen size"};
++        for (int i = 0; i < 4; ++i) {
++            XrActionCreateInfo info{XR_TYPE_ACTION_CREATE_INFO};
++            info.actionType = XR_ACTION_TYPE_BOOLEAN_INPUT;
++            strcpy_s(info.actionName, actionNames[i]);
++            strcpy_s(info.localizedActionName, labels[i]);
++            CHECK_XRCMD(xrCreateAction(m_input.actionSet, &info, &m_input.cinemaButtons[i]));
++        }
++        XrActionCreateInfo moveInfo{XR_TYPE_ACTION_CREATE_INFO};
++        moveInfo.actionType = XR_ACTION_TYPE_VECTOR2F_INPUT;
++        strcpy_s(moveInfo.actionName, "move_screen");
++        strcpy_s(moveInfo.localizedActionName, "Move screen");
++        CHECK_XRCMD(xrCreateAction(m_input.actionSet, &moveInfo, &m_input.moveScreen));
++#endif
+         std::array<XrPath, Side::COUNT> selectPath;
+         std::array<XrPath, Side::COUNT> squeezeValuePath;
+         std::array<XrPath, Side::COUNT> squeezeForcePath;
+@@ -444,13 +469,25 @@ struct OpenXrProgram : IOpenXrProgram {
+             XrPath oculusTouchInteractionProfilePath;
+             CHECK_XRCMD(
+                 xrStringToPath(m_instance, "/interaction_profiles/oculus/touch_controller", &oculusTouchInteractionProfilePath));
+-            std::vector<XrActionSuggestedBinding> bindings{{{m_input.grabAction, squeezeValuePath[Side::LEFT]},
+-                                                            {m_input.grabAction, squeezeValuePath[Side::RIGHT]},
++            std::vector<XrActionSuggestedBinding> bindings{{{m_input.grabAction, triggerValuePath[Side::LEFT]},
++                                                            {m_input.grabAction, triggerValuePath[Side::RIGHT]},
+                                                             {m_input.poseAction, posePath[Side::LEFT]},
+                                                             {m_input.poseAction, posePath[Side::RIGHT]},
+                                                             {m_input.quitAction, menuClickPath[Side::LEFT]},
+                                                             {m_input.vibrateAction, hapticPath[Side::LEFT]},
+                                                             {m_input.vibrateAction, hapticPath[Side::RIGHT]}}};
++#ifdef XR_USE_PLATFORM_ANDROID
++            const char* components[] = {"/user/hand/right/input/a/click", "/user/hand/right/input/b/click",
++                                        "/user/hand/left/input/x/click", "/user/hand/left/input/y/click"};
++            for (int i = 0; i < 4; ++i) {
++                XrPath path;
++                CHECK_XRCMD(xrStringToPath(m_instance, components[i], &path));
++                bindings.push_back({m_input.cinemaButtons[i], path});
++            }
++            XrPath thumbstick;
++            CHECK_XRCMD(xrStringToPath(m_instance, "/user/hand/left/input/thumbstick", &thumbstick));
++            bindings.push_back({m_input.moveScreen, thumbstick});
++#endif
+             XrInteractionProfileSuggestedBinding suggestedBindings{XR_TYPE_INTERACTION_PROFILE_SUGGESTED_BINDING};
+             suggestedBindings.interactionProfile = oculusTouchInteractionProfilePath;
+             suggestedBindings.suggestedBindings = bindings.data();
+@@ -823,6 +860,32 @@ struct OpenXrProgram : IOpenXrProgram {
+         syncInfo.activeActionSets = &activeActionSet;
+         CHECK_XRCMD(xrSyncActions(m_session, &syncInfo));
+ 
++#ifdef XR_USE_PLATFORM_ANDROID
++        for (auto hand : {Side::LEFT, Side::RIGHT}) {
++            XrActionStateGetInfo info{XR_TYPE_ACTION_STATE_GET_INFO, nullptr, m_input.grabAction,
++                                      m_input.handSubactionPath[hand]};
++            XrActionStateFloat value{XR_TYPE_ACTION_STATE_FLOAT};
++            CHECK_XRCMD(xrGetActionStateFloat(m_session, &info, &value));
++            const bool wasDown = m_input.triggerDown[hand];
++            const bool down = value.isActive && value.currentState > (wasDown ? 0.45f : 0.75f);
++            if (down && !wasDown) Cinema::Command(hand == Side::LEFT ? -1 : 1);
++            m_input.triggerDown[hand] = down;
++        }
++        const auto now = std::chrono::steady_clock::now();
++        const float seconds = std::chrono::duration<float>(now - m_input.lastInput).count();
++        m_input.lastInput = now;
++        XrActionStateGetInfo moveInfo{XR_TYPE_ACTION_STATE_GET_INFO, nullptr, m_input.moveScreen, XR_NULL_PATH};
++        XrActionStateVector2f motion{XR_TYPE_ACTION_STATE_VECTOR2F};
++        CHECK_XRCMD(xrGetActionStateVector2f(m_session, &moveInfo, &motion));
++        if (motion.isActive) Cinema::MoveScreen(motion.currentState.x, motion.currentState.y, seconds);
++        constexpr int commands[] = {0, 2, 3, 4};
++        for (int i = 0; i < 4; ++i) {
++            XrActionStateGetInfo info{XR_TYPE_ACTION_STATE_GET_INFO, nullptr, m_input.cinemaButtons[i], XR_NULL_PATH};
++            XrActionStateBoolean value{XR_TYPE_ACTION_STATE_BOOLEAN};
++            CHECK_XRCMD(xrGetActionStateBoolean(m_session, &info, &value));
++            if (value.isActive && value.changedSinceLastSync && value.currentState) Cinema::Command(commands[i]);
++        }
++#else
+         // Get pose and grab action state and start haptic vibrate when hand is 90% squeezed.
+         for (auto hand : {Side::LEFT, Side::RIGHT}) {
+             XrActionStateGetInfo getInfo{XR_TYPE_ACTION_STATE_GET_INFO};
+@@ -860,9 +923,13 @@ struct OpenXrProgram : IOpenXrProgram {
+         if ((quitValue.isActive == XR_TRUE) && (quitValue.changedSinceLastSync == XR_TRUE) && (quitValue.currentState == XR_TRUE)) {
+             CHECK_XRCMD(xrRequestExitSession(m_session));
+         }
++#endif
+     }
+ 
+     void RenderFrame() override {
++#ifdef XR_USE_PLATFORM_ANDROID
++        ++Cinema::renderFrame;
++#endif
+         CHECK(m_session != XR_NULL_HANDLE);
+ 
+         XrFrameWaitInfo frameWaitInfo{XR_TYPE_FRAME_WAIT_INFO};

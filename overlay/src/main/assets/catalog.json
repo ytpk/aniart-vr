@@ -1,0 +1,18 @@
+[
+  {
+    "title": "Big Buck Bunny",
+    "episode": "Демо • HLS",
+    "voice": "Оригинал",
+    "quality": "Авто",
+    "url": "https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8",
+    "type": "hls"
+  },
+  {
+    "title": "Sintel",
+    "episode": "Демо • MP4",
+    "voice": "Оригинал",
+    "quality": "Авто",
+    "url": "https://media.w3.org/2010/05/sintel/trailer.mp4",
+    "type": "mp4"
+  }
+]
