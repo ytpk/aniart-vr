@@ -15,5 +15,5 @@ bin=${JAVA_HOME:+$JAVA_HOME/bin/}
 source=overlay/src/main/java/dev/aniart/vr
 "${bin}javac" -encoding UTF-8 -cp "$json_jar" -d "$test_dir" \
     "$source/AnixartCatalog.java" "$source/AnixartPlayback.java" "$source/KodikStreams.java" \
-    "$source/IncomingVideo.java" tools/tests/AnixartCheck.java
+    "$source/Kodik720.java" "$source/IncomingVideo.java" tools/tests/AnixartCheck.java
 "${bin}java" -cp "$test_dir:$json_jar" dev.aniart.vr.AnixartCheck "$@"

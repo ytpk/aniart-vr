@@ -81,13 +81,15 @@ public final class AnixartCheck {
 
     public static void main(String[] args) throws Exception {
         scripted();
+        test720();
         if (args.length == 1 && args[0].equals("--live")) live();
     }
 
     private static void scripted() throws Exception {
         var fixture = new Fixture();
         var api = new AnixartCatalog(fixture);
-        var playback = new AnixartPlayback(api, url -> KodikStreams.resolve(url, fixture::provider));
+        var playback = new AnixartPlayback(api, url -> KodikStreams.resolve(url, fixture::provider),
+                (url, headers) -> false);
         check(api.titles("", 0).size() == 1, "browse titles");
         var results = api.titles("Тайтл", 0);
         check(results.size() == 1 && results.get(0).name().equals("Title"), "search filters and title fallback");
@@ -133,6 +135,34 @@ public final class AnixartCheck {
         System.out.println("PASS: Anixart search → voice → source → episodes → direct HLS or Kodik, quality order, handoff and denial handling");
     }
 
+    private static void test720() throws Exception {
+        String source = "https://cloud2.solodcdn.com/test/480.mp4?token=a%2Bb&ip=";
+        String expected = "https://cloud2.solodcdn.com/test/720.mp4:hls:manifest.m3u8?token=a%2Bb&ip=";
+        Map<String, String> headers = Map.of("Referer", "https://kodikplayer.com/");
+        var original = new KodikStreams.Stream(source, 480, false, headers);
+        var streams = Kodik720.addIfAvailable(List.of(original), (url, requestHeaders) -> {
+            check(url.equals(expected) && requestHeaders.equals(headers), "preserved signed query and headers");
+            return Kodik720.isPlaylistPrefix("#EXTM3U\n#EXTINF:5,\nsegment.ts");
+        });
+        check(streams.size() == 2 && streams.get(0).url().equals(expected) && streams.get(1) == original,
+                "append verified quality while keeping original");
+        check(Kodik720.addIfAvailable(List.of(original), (url, h) -> false).equals(List.of(original)), "404 fallback");
+        check(!Kodik720.isPlaylistPrefix("<html>Error</html>"), "reject HTML served with HTTP 200");
+        check(Kodik720.candidateUrl("https://cloud2.solodcdn.com.example.org/480.mp4") == null, "reject unrelated hosts");
+        check(Kodik720.candidateUrl("https://kodikplayer.com/video/11/abcdefgh/720p") == null, "do not guess from iframe");
+        check(Kodik720.candidateUrl(HLS_480).equals("https://cloud2.solodcdn.com/test/720.mp4:hls:manifest.m3u8"),
+                "rewrite existing HLS suffix once");
+        check(Kodik720.addIfAvailable(streams, (url, h) -> { throw new AssertionError(); }) == streams,
+                "skip probe when provider offers 720p");
+        var api = new AnixartCatalog((path, payload) -> { throw new AssertionError(path); });
+        var playback = new AnixartPlayback(api, url -> { throw new AssertionError(url); }, (url, h) -> url.equals(expected));
+        var direct = playback.resolve(new AnixartCatalog.Title(1, "Test", "", 0, "", false),
+                new AnixartCatalog.Option(8, "Kodik", 1), new AnixartCatalog.Episode(1, "Episode", source));
+        check(direct.link().url().equals(source) && direct.streams().get(0).url().equals(expected),
+                "direct MP4 route exposes verified HLS variant");
+        System.out.println("PASS: 480 MP4/HLS → verified Kodik 720 HLS without changing the query");
+    }
+
     private static void live() throws Exception {
         var api = new AnixartCatalog();
         var popular = api.titles("", 0);
@@ -163,11 +193,11 @@ public final class AnixartCheck {
             }
             var result = playback.resolve(title, source, episodes.get(0));
             System.out.println("PASS: live voice → source → episodes → target for release " + title.id());
-            if (!result.link().embedded()) {
-                playable |= verifyMedia(result.link().url(), result.link().hls(), KodikStreams.headersForCdn(result.link().url()));
-            } else if (!result.streams().isEmpty()) {
+            if (!result.streams().isEmpty()) {
                 var stream = result.streams().get(0);
                 playable |= verifyMedia(stream.url(), stream.hls(), stream.headers());
+            } else if (!result.link().embedded()) {
+                playable |= verifyMedia(result.link().url(), result.link().hls(), KodikStreams.headersForCdn(result.link().url()));
             } else {
                 System.out.println("BLOCKED: live Kodik media resolution: " + result.status());
             }

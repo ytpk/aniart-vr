@@ -148,19 +148,20 @@ final class AnixartBrowser {
                              AnixartCatalog.Option source, AnixartCatalog.Episode episode) {
         load(next, () -> playback.resolve(title, source, episode), result -> {
             var link = result.link();
-            if (!link.embedded()) {
-                next.rows = List.of(new Row("Смотреть в VR", () -> play.accept(new Catalog.Episode(title.name(),
-                        episode.name(), voice.name(), source.name(), Uri.parse(link.url()), link.hls(),
-                        KodikStreams.headersForCdn(link.url()), 0))));
-                return;
-            }
-
             var rows = new java.util.ArrayList<Row>();
             for (var stream : result.streams()) {
                 String quality = stream.height() + "p";
                 rows.add(new Row("Смотреть в VR  ·  " + quality, () -> play.accept(new Catalog.Episode(
                         title.name(), episode.name(), voice.name(), quality, Uri.parse(stream.url()),
                         stream.hls(), stream.headers(), 0))));
+            }
+            if (!link.embedded()) {
+                rows.add(new Row("Смотреть исходный поток", () -> play.accept(new Catalog.Episode(title.name(),
+                        episode.name(), voice.name(), source.name(), Uri.parse(link.url()), link.hls(),
+                        KodikStreams.headersForCdn(link.url()), 0))));
+                next.rows = List.copyOf(rows);
+                next.page = 0;
+                return;
             }
             if (KodikStreams.isEmbed(link.url())) {
                 rows.add(new Row("Вставить прямой поток", () -> activity.pasteVideoLink(title.name())));
