@@ -395,7 +395,8 @@ final class CinemaPanel {
         }
         if (titles.isEmpty()) text("Здесь пока нет тайтлов", 32, 270, 33, MUTED, 900, false);
         pageButtons(libraryPage, titles.size(), PAGE_SIZE, 32, 689, 490, next -> libraryPage = next);
-        if (!notice.isEmpty()) text(notice, 544, 723, 22, MUTED, 704, false);
+        button("Вставить ссылку", 546, 689, 248, 52, false, () -> activity.pasteVideoLink(null));
+        if (!notice.isEmpty()) text(notice, 810, 723, 20, MUTED, 438, false);
     }
 
     private void card(Catalog.Series series, float x, float y) {

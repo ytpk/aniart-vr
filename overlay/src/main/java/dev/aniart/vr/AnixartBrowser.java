@@ -177,6 +177,7 @@ final class AnixartBrowser {
                         stream.hls(), stream.headers(), 0))));
             }
             if (KodikStreams.isEmbed(link.url())) {
+                rows.add(new Row("Вставить прямой поток", () -> activity.pasteVideoLink(title.name())));
                 rows.add(new Row("Обновить потоки Kodik", () -> loadEpisode(next, title, voice, source, episode)));
             }
             rows.add(new Row("Открыть веб-плеер " + source.name(), () -> openEmbedded(next, title, source, episode)));

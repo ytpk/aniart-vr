@@ -2,6 +2,7 @@ package dev.aniart.vr;
 
 import android.app.NativeActivity;
 import android.content.Context;
+import android.content.ClipboardManager;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.graphics.SurfaceTexture;
@@ -33,7 +34,6 @@ import java.io.File;
 import java.io.FileOutputStream;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Locale;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -117,29 +117,45 @@ public final class CinemaActivity extends NativeActivity {
 
     private void acceptVideoLink(Intent intent) {
         if (intent == null) return;
-        String raw;
-        if (Intent.ACTION_VIEW.equals(intent.getAction())) {
-            raw = intent.getDataString();
-        } else if (Intent.ACTION_SEND.equals(intent.getAction())) {
-            CharSequence value = intent.getCharSequenceExtra(Intent.EXTRA_TEXT);
-            raw = value == null ? null : value.toString().trim();
-        } else {
+        try {
+            if (Intent.ACTION_VIEW.equals(intent.getAction())) {
+                acceptDirectLink(intent.getDataString(), intent.getStringExtra("title"),
+                        intent.getStringArrayExtra("headers"));
+            } else if (Intent.ACTION_SEND.equals(intent.getAction())) {
+                CharSequence value = intent.getCharSequenceExtra(Intent.EXTRA_TEXT);
+                acceptDirectLink(value == null ? null : value.toString(), null, null);
+            }
+        } catch (android.os.BadParcelableException | ClassCastException error) {
+            notice = "Не удалось прочитать отправленную ссылку";
+        }
+    }
+
+    private void acceptDirectLink(String value, String title, String[] headers) {
+        var link = IncomingVideo.parse(value, headers);
+        if (link == null) {
+            notice = value != null && value.length() <= 8192 && KodikStreams.isEmbed(value.trim())
+                    ? "Это страница Kodik. Скопируйте полный URL потока в Anixart"
+                    : "Нужна прямая HTTPS-ссылка на .m3u8 или .mp4";
             return;
         }
-        if (raw != null && raw.length() <= 8192 && raw.chars().noneMatch(Character::isWhitespace)) {
-            Uri uri = Uri.parse(raw);
-            String path = uri.getPath();
-            if ("https".equals(uri.getScheme()) && uri.getHost() != null && uri.getUserInfo() == null && path != null) {
-                String lower = path.toLowerCase(Locale.ROOT);
-                boolean hls = lower.endsWith(".m3u8");
-                if (hls || lower.endsWith(".mp4")) {
-                    sharedEpisode = new Catalog.Episode("Открытая ссылка", uri.getHost(), "Оригинал",
-                            hls ? "HLS" : "MP4", uri, hls, KodikStreams.headersForCdn(raw), 0);
-                    return;
-                }
+        sharedEpisode = new Catalog.Episode(IncomingVideo.title(title, "Открытая ссылка"), link.host(),
+                "Прямой поток", link.quality(), Uri.parse(link.url()), link.hls(), link.headers(), 0);
+        notice = "";
+    }
+
+    void pasteVideoLink(String title) {
+        ui.post(() -> {
+            ClipboardManager clipboard = getSystemService(ClipboardManager.class);
+            var clip = clipboard == null ? null : clipboard.getPrimaryClip();
+            if (clip == null || clip.getItemCount() == 0) {
+                notice = "Буфер обмена пуст или недоступен";
+                return;
             }
-        }
-        notice = "Нужна прямая HTTPS-ссылка на .m3u8 или .mp4";
+            var item = clip.getItemAt(0);
+            String value = item.getText() != null ? item.getText().toString()
+                    : item.getUri() == null ? null : item.getUri().toString();
+            acceptDirectLink(value, title, null);
+        });
     }
 
     @Override protected void onResume() {
