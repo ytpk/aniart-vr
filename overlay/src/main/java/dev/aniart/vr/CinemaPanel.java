@@ -36,6 +36,8 @@ final class CinemaPanel {
     record Target(RectF rect, Click click) {}
 
     private final CinemaActivity activity;
+    private final AnixartBrowser anixart;
+    private boolean remote;
     private final SharedPreferences preferences;
     private final TextPaint paint = new TextPaint(Paint.ANTI_ALIAS_FLAG);
     private final List<Target> buttons = new ArrayList<>();
@@ -63,6 +65,8 @@ final class CinemaPanel {
 
     CinemaPanel(CinemaActivity activity, SharedPreferences preferences) {
         this.activity = activity;
+        this.anixart = new AnixartBrowser(activity, this::playEpisode);
+        remote = preferences.getBoolean("anixart_tab", true);
         this.preferences = preferences;
         fast = preferences.getBoolean("anime4k", false);
         comparison = preferences.getBoolean("comparison", false);
@@ -72,13 +76,17 @@ final class CinemaPanel {
         autoNext = preferences.getBoolean("auto_next", true);
     }
 
+    void shutdown() { anixart.shutdown(); }
+
     int renderConfig() {
+        if (anixart.pump()) dirty = true;
         var shared = activity.sharedEpisode();
         if (shared != lastShared) {
             lastShared = shared;
             if (shared != null) {
                 show(LIBRARY);
                 keyboard = false;
+                remote = false;
                 details = Catalog.group(List.of(shared)).get(0);
                 section = shared.episode();
                 sectionsPage = variantsPage = 0;
@@ -86,6 +94,7 @@ final class CinemaPanel {
                 dirty = true;
             }
         }
+        if (remote && page == LIBRARY) anixart.start();
         var state = activity.snapshot();
         if (state.episode() != currentEpisode) {
             currentEpisode = state.episode();
@@ -142,6 +151,8 @@ final class CinemaPanel {
             dirty = true;
         } else if (page == SETTINGS) {
             show(WATCH);
+        } else if (remote && page == LIBRARY && anixart.back()) {
+            dirty = true;
         } else if (details != null && page == LIBRARY) {
             details = null;
             dirty = true;
@@ -163,7 +174,13 @@ final class CinemaPanel {
             case 5, 6 -> {
                 if (page != LIBRARY || keyboard) return;
                 int step = command == 5 ? -1 : 1;
-                if (details == null) {
+                if (remote) {
+                    var screen = anixart.screen();
+                    if (screen == null || screen.loading) return;
+                    int count = screen.kind == AnixartBrowser.Kind.TITLES ? screen.titles.size() : screen.rows.size();
+                    int size = screen.kind == AnixartBrowser.Kind.TITLES ? PAGE_SIZE : DETAIL_SIZE;
+                    screen.page = pageIndex(screen.page + step, count, size);
+                } else if (details == null) {
                     libraryPage = pageIndex(libraryPage + step, visibleSeries().size(), PAGE_SIZE);
                 } else {
                     sectionsPage = pageIndex(sectionsPage + step, details.episodes().size(), DETAIL_SIZE);
@@ -245,6 +262,7 @@ final class CinemaPanel {
             header(state);
             if (page == SETTINGS) settings(notice);
             else if (keyboard) keyboard();
+            else if (remote) remoteCatalog(notice);
             else if (details != null) detail();
             else library(notice);
         }
@@ -256,15 +274,86 @@ final class CinemaPanel {
 
     private void header(CinemaActivity.Snapshot state) {
         box(0, 0, WIDTH, 96, 0, 0xff191e2f);
-        text("Aniart VR", 32, 60, 35, INK, 260, true);
-        button("Каталог", 330, 22, 205, 53, page == LIBRARY, () -> {
-            details = null;
-            keyboard = false;
-            show(LIBRARY);
-        });
+        button("Anixart", 32, 22, 176, 53, page == LIBRARY && remote, () -> switchCatalog(true));
+        button("Локальное", 224, 22, 202, 53, page == LIBRARY && !remote, () -> switchCatalog(false));
         if (state.episode() != null) button("Плеер", 551, 22, 190, 53, false, () -> show(WATCH));
         button("Настройки", 757, 22, 215, 53, page == SETTINGS, () -> show(SETTINGS));
         if (state.episode() != null) button("Скрыть", 1035, 22, 213, 53, false, () -> show(HIDDEN));
+    }
+
+    private void switchCatalog(boolean useRemote) {
+        if (remote != useRemote) search = "";
+        remote = useRemote;
+        preferences.edit().putBoolean("anixart_tab", remote).apply();
+        details = null;
+        keyboard = false;
+        show(LIBRARY);
+    }
+
+    private void playEpisode(Catalog.Episode episode) {
+        activity.open(episode);
+        page = WATCH;
+        lastUse = SystemClock.uptimeMillis();
+    }
+
+    private void remoteCatalog(String notice) {
+        var screen = anixart.screen();
+        if (screen == null) return;
+        if (screen.kind == AnixartBrowser.Kind.TITLES) {
+            text(screen.title, 32, 160, 42, INK, 520, true);
+            button(screen.subtitle.isEmpty() ? "Поиск Anixart" : "Поиск  ·  " + screen.subtitle,
+                    580, 113, 668, 61, false, () -> { search = screen.subtitle; keyboard = true; });
+            screen.page = pageIndex(screen.page, screen.titles.size(), PAGE_SIZE);
+            int start = screen.page * PAGE_SIZE;
+            for (int i = start; i < Math.min(start + PAGE_SIZE, screen.titles.size()); i++) {
+                int cell = i - start;
+                remoteCard(screen.titles.get(i), 32 + (cell % 4) * 308, 196 + (cell / 4) * 233);
+            }
+            pageButtons(screen.page, screen.titles.size(), PAGE_SIZE, 32, 689, 445, value -> screen.page = value);
+            if (screen.remotePage > 0) button("‹  Выдача", 505, 689, 150, 52, false,
+                    () -> anixart.openTitlePage(screen.remotePage - 1));
+            if (screen.more) button("Ещё тайтлы  ›", 670, 689, 194, 52, false,
+                    () -> anixart.openTitlePage(screen.remotePage + 1));
+            if (!screen.status.isEmpty()) text(screen.status, 32, 270, 30, MUTED, 920, false);
+            if (screen.retry != null) button("Повторить", 32, 302, 266, 62, true, screen.retry);
+        } else {
+            button("‹  Назад", 32, 115, 168, 56, false, () -> anixart.back());
+            text(screen.title, 224, 156, 39, INK, 1024, true);
+            text(screen.subtitle, 32, 226, 27, MUTED, 1216, false);
+            screen.page = pageIndex(screen.page, screen.rows.size(), DETAIL_SIZE);
+            int start = screen.page * DETAIL_SIZE;
+            if (!screen.loading && screen.retry == null) {
+                for (int i = start; i < Math.min(start + DETAIL_SIZE, screen.rows.size()); i++) {
+                    var row = screen.rows.get(i);
+                    button(row.label(), 32, 246 + (i - start) * 82, 892, 65, false, row.open());
+                }
+            }
+            if (screen.retry != null) button("Повторить", 32, 246, 266, 62, true, screen.retry);
+            pageButtons(screen.page, screen.rows.size(), DETAIL_SIZE, 32, 689, 445, value -> screen.page = value);
+            if (!screen.status.isEmpty()) text(screen.status, 32, screen.rows.isEmpty() && screen.retry == null ? 298 : 670, 24, MUTED, 1160, false);
+        }
+        if (!notice.isEmpty()) text(notice, 882, 723, 17, MUTED, 366, false);
+    }
+
+    private void remoteCard(AnixartCatalog.Title title, float x, float y) {
+        boolean focus = hovered == buttons.size();
+        box(x, y, 292, 217, 14, focus ? FOCUS : TILE);
+        box(x + 9, y + 8, 100, 149, 10, 0xff3a345b);
+        Bitmap poster = anixart.poster(title.poster());
+        if (poster != null) {
+            bounds.set(x + 9, y + 8, x + 109, y + 157);
+            paint.setFilterBitmap(true);
+            canvas.drawBitmap(poster, null, bounds, paint);
+        } else {
+            int[] initials = title.name().codePoints().limit(2).toArray();
+            text(new String(initials, 0, initials.length).toUpperCase(Locale.ROOT),
+                    x + 19, y + 94, 35, ACCENT, 84, true);
+        }
+        text(title.year(), x + 123, y + 56, 23, ACCENT, 155, true);
+        if (title.episodes() > 0) text("Серий: " + title.episodes(), x + 123, y + 90, 19, MUTED, 155, false);
+        if (title.blocked()) text("Ограничено", x + 123, y + 126, 17, MUTED, 155, false);
+        text(title.name(), x + 12, y + 194, 23, INK, 268, true);
+        buttons.add(new Target(new RectF(x, y, x + 292, y + 217), ignored -> anixart.select(title)));
     }
 
     private List<Catalog.Series> visibleSeries() {
@@ -361,11 +450,8 @@ final class CinemaPanel {
             Catalog.Episode variant = variants.get(i);
             long resume = activity.positionFor(variant);
             String label = (resume > 5000 ? "Продолжить " + time(resume) + "   ·   " : "▶   ") + variant.variant();
-            button(label, 650, 246 + (i - start) * 82, 598, 66, variant.equals(currentEpisode), () -> {
-                activity.open(variant);
-                page = WATCH;
-                lastUse = SystemClock.uptimeMillis();
-            });
+            button(label, 650, 246 + (i - start) * 82, 598, 66, variant.equals(currentEpisode),
+                    () -> playEpisode(variant));
         }
         pageButtons(sectionsPage, sections.size(), DETAIL_SIZE, 32, 689, 590, value -> sectionsPage = value);
         pageButtons(variantsPage, variants.size(), DETAIL_SIZE, 650, 689, 598, value -> variantsPage = value);
@@ -402,7 +488,10 @@ final class CinemaPanel {
             search = "";
             libraryPage = 0;
         });
-        button("Показать (" + visibleSeries().size() + ")", 971, 609, 277, 77, true, () -> keyboard = false);
+        button(remote ? "Искать" : "Показать (" + visibleSeries().size() + ")", 971, 609, 277, 77, true, () -> {
+            keyboard = false;
+            if (remote) anixart.search(search);
+        });
     }
 
     private void append(String value) {

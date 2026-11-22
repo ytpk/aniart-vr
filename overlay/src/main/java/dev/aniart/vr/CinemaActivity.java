@@ -149,6 +149,24 @@ public final class CinemaActivity extends NativeActivity {
         super.onPause();
     }
 
+    @Override protected void onDestroy() {
+        super.onDestroy();
+        panel.shutdown();
+    }
+
+    void openEmbedded(String url) {
+        ui.post(() -> {
+            try {
+                Intent view = new Intent(Intent.ACTION_VIEW, Uri.parse(url));
+                view.addCategory(Intent.CATEGORY_BROWSABLE);
+                startActivity(view);
+                notice = "";
+            } catch (android.content.ActivityNotFoundException error) {
+                notice = "На устройстве нет приложения для открытия веб-плеера";
+            }
+        });
+    }
+
     List<Catalog.Series> catalog() { return catalog; }
     Catalog.Episode sharedEpisode() { return sharedEpisode; }
     Snapshot snapshot() { return snapshot; }
