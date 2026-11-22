@@ -19,7 +19,7 @@ final class AnixartCatalog {
 
     record Title(long id, String name, String year, int episodes, String poster, boolean blocked) {}
     record Option(long id, String name, int episodes) {}
-    record Episode(long position, String name, String url, boolean iframe) {}
+    record Episode(long position, String name, String url) {}
     record Link(String url, boolean hls, boolean embedded) {}
 
     List<Title> titles(String query, int page) throws Exception {
@@ -46,22 +46,22 @@ final class AnixartCatalog {
             long position = item.optLong("position", -1);
             if (position < 0) continue;
             result.add(new Episode(position, label(item, "name", "Серия " + position),
-                    label(item, "url", ""), item.optBoolean("iframe", true)));
+                    label(item, "url", "")));
         }
         return List.copyOf(result);
     }
 
     Link resolve(Title title, Option source, Episode episode) throws Exception {
-        Link existing = link(episode.url(), episode.iframe());
+        Link existing = link(episode.url());
         if (existing != null && !existing.embedded()) return existing;
         var data = request("episode/target/" + title.id() + "/" + source.id() + "/" + episode.position(), null);
         JSONObject item = data.getJSONObject("episode");
-        Link target = link(label(item, "url", ""), item.optBoolean("iframe", true));
+        Link target = link(label(item, "url", ""));
         if (target == null) throw new IOException("Источник не вернул HTTPS-ссылку");
         return target;
     }
 
-    static Link link(String value, boolean iframe) {
+    static Link link(String value) {
         URI uri;
         try {
             uri = URI.create(value);
@@ -71,11 +71,11 @@ final class AnixartCatalog {
         if (!"https".equalsIgnoreCase(uri.getScheme()) || uri.getHost() == null || uri.getUserInfo() != null) return null;
         String path = uri.getPath().toLowerCase(Locale.ROOT);
         boolean hls = path.endsWith(".m3u8");
-        return new Link(uri.toASCIIString(), hls, iframe || (!hls && !path.endsWith(".mp4")));
+        return new Link(uri.toASCIIString(), hls, !hls && !path.endsWith(".mp4"));
     }
 
     static URL posterUrl(String value) throws Exception {
-        Link link = link(value, true);
+        Link link = link(value);
         if (link == null) throw new IOException("Invalid poster URL");
         URL url = new URL(link.url());
         if (!url.getHost().endsWith(".anixmirai.com")) throw new IOException("Unknown poster host");
