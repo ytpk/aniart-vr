@@ -1,5 +1,14 @@
 [
   {
+    "title": "Лунный пролёт",
+    "episode": "Демо стерео · офлайн",
+    "voice": "Без звука",
+    "quality": "SBS · 640×360 на глаз",
+    "url": "asset:///stereo-demo.mp4",
+    "type": "mp4",
+    "stereo": "sbs"
+  },
+  {
     "title": "Big Buck Bunny",
     "episode": "Демо • HLS",
     "voice": "Оригинал",

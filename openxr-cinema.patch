@@ -56,7 +56,7 @@ index 93e708c..1c7558d 100644
  source_group("Headers" FILES ${LOCAL_HEADERS})
  source_group("Shaders" FILES ${VULKAN_SHADERS})
 diff --git a/src/tests/hello_xr/graphicsplugin_opengles.cpp b/src/tests/hello_xr/graphicsplugin_opengles.cpp
-index d5249e6..b4c9b99 100644
+index d5249e6..f7bc692 100644
 --- a/src/tests/hello_xr/graphicsplugin_opengles.cpp
 +++ b/src/tests/hello_xr/graphicsplugin_opengles.cpp
 @@ -12,6 +12,9 @@
@@ -108,7 +108,7 @@ index d5249e6..b4c9b99 100644
  
 +#ifdef XR_USE_PLATFORM_ANDROID
 +        UNUSED_PARM(cubes);
-+        m_cinema.Draw(vp);
++        m_cinema.Draw(vp, pose.position);
 +#else
          // Set cube primitive data.
          glBindVertexArray(m_vao);
@@ -180,7 +180,7 @@ index 9a97444..c497e91 100644
  #else
  int main(int argc, char* argv[]) {
 diff --git a/src/tests/hello_xr/openxr_program.cpp b/src/tests/hello_xr/openxr_program.cpp
-index c65099b..526bb6e 100644
+index c65099b..481e289 100644
 --- a/src/tests/hello_xr/openxr_program.cpp
 +++ b/src/tests/hello_xr/openxr_program.cpp
 @@ -4,6 +4,9 @@
@@ -193,26 +193,27 @@ index c65099b..526bb6e 100644
  #include "common.h"
  #include "options.h"
  #include "platformdata.h"
-@@ -329,6 +332,12 @@ struct OpenXrProgram : IOpenXrProgram {
+@@ -329,6 +332,13 @@ struct OpenXrProgram : IOpenXrProgram {
      }
  
      struct InputState {
 +#ifdef XR_USE_PLATFORM_ANDROID
 +        XrAction cinemaButtons[4]{};
 +        XrAction moveScreen{XR_NULL_HANDLE};
++        std::chrono::steady_clock::time_point nextScroll{};
 +        std::chrono::steady_clock::time_point lastInput = std::chrono::steady_clock::now();
 +        bool triggerDown[2]{};
 +#endif
          XrActionSet actionSet{XR_NULL_HANDLE};
          XrAction grabAction{XR_NULL_HANDLE};
          XrAction poseAction{XR_NULL_HANDLE};
-@@ -392,6 +401,22 @@ struct OpenXrProgram : IOpenXrProgram {
+@@ -392,6 +402,22 @@ struct OpenXrProgram : IOpenXrProgram {
              CHECK_XRCMD(xrCreateAction(m_input.actionSet, &actionInfo, &m_input.quitAction));
          }
  
 +#ifdef XR_USE_PLATFORM_ANDROID
-+        const char* actionNames[] = {"play_pause", "upscaling", "catalog", "screen_size"};
-+        const char* labels[] = {"Play or pause", "Anime4K", "Catalog", "Screen size"};
++        const char* actionNames[] = {"play_pause", "go_back", "catalog", "controls"};
++        const char* labels[] = {"Play or pause", "Back", "Catalog", "Controls"};
 +        for (int i = 0; i < 4; ++i) {
 +            XrActionCreateInfo info{XR_TYPE_ACTION_CREATE_INFO};
 +            info.actionType = XR_ACTION_TYPE_BOOLEAN_INPUT;
@@ -229,7 +230,7 @@ index c65099b..526bb6e 100644
          std::array<XrPath, Side::COUNT> selectPath;
          std::array<XrPath, Side::COUNT> squeezeValuePath;
          std::array<XrPath, Side::COUNT> squeezeForcePath;
-@@ -444,13 +469,25 @@ struct OpenXrProgram : IOpenXrProgram {
+@@ -444,13 +470,27 @@ struct OpenXrProgram : IOpenXrProgram {
              XrPath oculusTouchInteractionProfilePath;
              CHECK_XRCMD(
                  xrStringToPath(m_instance, "/interaction_profiles/oculus/touch_controller", &oculusTouchInteractionProfilePath));
@@ -243,6 +244,8 @@ index c65099b..526bb6e 100644
                                                              {m_input.vibrateAction, hapticPath[Side::LEFT]},
                                                              {m_input.vibrateAction, hapticPath[Side::RIGHT]}}};
 +#ifdef XR_USE_PLATFORM_ANDROID
++            CHECK_XRCMD(xrStringToPath(m_instance, "/user/hand/left/input/aim/pose", &bindings[2].binding));
++            CHECK_XRCMD(xrStringToPath(m_instance, "/user/hand/right/input/aim/pose", &bindings[3].binding));
 +            const char* components[] = {"/user/hand/right/input/a/click", "/user/hand/right/input/b/click",
 +                                        "/user/hand/left/input/x/click", "/user/hand/left/input/y/click"};
 +            for (int i = 0; i < 4; ++i) {
@@ -257,7 +260,7 @@ index c65099b..526bb6e 100644
              XrInteractionProfileSuggestedBinding suggestedBindings{XR_TYPE_INTERACTION_PROFILE_SUGGESTED_BINDING};
              suggestedBindings.interactionProfile = oculusTouchInteractionProfilePath;
              suggestedBindings.suggestedBindings = bindings.data();
-@@ -823,6 +860,32 @@ struct OpenXrProgram : IOpenXrProgram {
+@@ -823,6 +863,40 @@ struct OpenXrProgram : IOpenXrProgram {
          syncInfo.activeActionSets = &activeActionSet;
          CHECK_XRCMD(xrSyncActions(m_session, &syncInfo));
  
@@ -269,7 +272,7 @@ index c65099b..526bb6e 100644
 +            CHECK_XRCMD(xrGetActionStateFloat(m_session, &info, &value));
 +            const bool wasDown = m_input.triggerDown[hand];
 +            const bool down = value.isActive && value.currentState > (wasDown ? 0.45f : 0.75f);
-+            if (down && !wasDown) Cinema::Command(hand == Side::LEFT ? -1 : 1);
++            Cinema::controllers[hand].pressed = down && !wasDown;
 +            m_input.triggerDown[hand] = down;
 +        }
 +        const auto now = std::chrono::steady_clock::now();
@@ -278,8 +281,16 @@ index c65099b..526bb6e 100644
 +        XrActionStateGetInfo moveInfo{XR_TYPE_ACTION_STATE_GET_INFO, nullptr, m_input.moveScreen, XR_NULL_PATH};
 +        XrActionStateVector2f motion{XR_TYPE_ACTION_STATE_VECTOR2F};
 +        CHECK_XRCMD(xrGetActionStateVector2f(m_session, &moveInfo, &motion));
-+        if (motion.isActive) Cinema::MoveScreen(motion.currentState.x, motion.currentState.y, seconds);
-+        constexpr int commands[] = {0, 2, 3, 4};
++        if (motion.isActive) {
++            const int page = Cinema::config & 7;
++            if (page == 0 || page == 2) {
++                Cinema::MoveScreen(motion.currentState.x, motion.currentState.y, seconds);
++            } else if (std::abs(motion.currentState.y) > .65f && now >= m_input.nextScroll) {
++                Cinema::Command(motion.currentState.y > 0 ? 5 : 6);
++                m_input.nextScroll = now + std::chrono::milliseconds(270);
++            }
++        }
++        constexpr int commands[] = {0, 1, 2, 3};
 +        for (int i = 0; i < 4; ++i) {
 +            XrActionStateGetInfo info{XR_TYPE_ACTION_STATE_GET_INFO, nullptr, m_input.cinemaButtons[i], XR_NULL_PATH};
 +            XrActionStateBoolean value{XR_TYPE_ACTION_STATE_BOOLEAN};
@@ -290,7 +301,7 @@ index c65099b..526bb6e 100644
          // Get pose and grab action state and start haptic vibrate when hand is 90% squeezed.
          for (auto hand : {Side::LEFT, Side::RIGHT}) {
              XrActionStateGetInfo getInfo{XR_TYPE_ACTION_STATE_GET_INFO};
-@@ -860,9 +923,13 @@ struct OpenXrProgram : IOpenXrProgram {
+@@ -860,9 +934,13 @@ struct OpenXrProgram : IOpenXrProgram {
          if ((quitValue.isActive == XR_TRUE) && (quitValue.changedSinceLastSync == XR_TRUE) && (quitValue.currentState == XR_TRUE)) {
              CHECK_XRCMD(xrRequestExitSession(m_session));
          }
@@ -304,3 +315,44 @@ index c65099b..526bb6e 100644
          CHECK(m_session != XR_NULL_HANDLE);
  
          XrFrameWaitInfo frameWaitInfo{XR_TYPE_FRAME_WAIT_INFO};
+@@ -915,6 +993,22 @@ struct OpenXrProgram : IOpenXrProgram {
+ 
+         projectionLayerViews.resize(viewCountOutput);
+ 
++#ifdef XR_USE_PLATFORM_ANDROID
++        std::vector<Cube> cubes;
++        for (auto hand : {Side::LEFT, Side::RIGHT}) {
++            auto& controller = Cinema::controllers[hand];
++            controller.tracked = false;
++            if (!IsSessionFocused()) continue;
++            XrSpaceLocation location{XR_TYPE_SPACE_LOCATION};
++            const XrSpaceLocationFlags valid = XR_SPACE_LOCATION_POSITION_VALID_BIT |
++                                               XR_SPACE_LOCATION_ORIENTATION_VALID_BIT;
++            res = xrLocateSpace(m_input.handSpace[hand], m_appSpace, predictedDisplayTime, &location);
++            if (XR_UNQUALIFIED_SUCCESS(res) && (location.locationFlags & valid) == valid) {
++                controller.pose = location.pose;
++                controller.tracked = true;
++            }
++        }
++#else
+         // For each locatable space that we want to visualize, render a 25cm cube.
+         std::vector<Cube> cubes;
+ 
+@@ -955,6 +1049,7 @@ struct OpenXrProgram : IOpenXrProgram {
+             }
+         }
+ 
++#endif
+         // Render view to the appropriate part of the swapchain image.
+         for (uint32_t i = 0; i < viewCountOutput; i++) {
+             // Each view has a separate swapchain which is acquired, rendered to, and released.
+@@ -977,6 +1072,9 @@ struct OpenXrProgram : IOpenXrProgram {
+             projectionLayerViews[i].subImage.imageRect.extent = {viewSwapchain.width, viewSwapchain.height};
+ 
+             const XrSwapchainImageBaseHeader* const swapchainImage = m_swapchainImages[viewSwapchain.handle][swapchainImageIndex];
++#ifdef XR_USE_PLATFORM_ANDROID
++            Cinema::eye = i;
++#endif
+             m_graphicsPlugin->RenderView(projectionLayerViews[i], swapchainImage, m_colorSwapchainFormat, cubes);
+ 
+             XrSwapchainImageReleaseInfo releaseInfo{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};

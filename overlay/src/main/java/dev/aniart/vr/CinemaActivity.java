@@ -1,54 +1,97 @@
 package dev.aniart.vr;
 
 import android.app.NativeActivity;
-import android.graphics.Bitmap;
-import android.graphics.Canvas;
-import android.graphics.Color;
-import android.graphics.Paint;
+import android.content.Intent;
+import android.content.SharedPreferences;
 import android.graphics.SurfaceTexture;
-import android.opengl.GLUtils;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
-import android.text.TextPaint;
-import android.text.TextUtils;
+import android.util.AtomicFile;
 import android.util.Log;
 import android.view.Surface;
+import androidx.media3.common.AudioAttributes;
+import androidx.media3.common.C;
 import androidx.media3.common.MediaItem;
 import androidx.media3.common.MimeTypes;
 import androidx.media3.common.PlaybackException;
 import androidx.media3.common.Player;
 import androidx.media3.common.VideoSize;
+import androidx.media3.datasource.DefaultDataSource;
 import androidx.media3.datasource.DefaultHttpDataSource;
 import androidx.media3.exoplayer.ExoPlayer;
 import androidx.media3.exoplayer.analytics.AnalyticsListener;
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory;
+import java.io.File;
+import java.io.FileOutputStream;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 
 public final class CinemaActivity extends NativeActivity {
+    private static final int IMPORT_CATALOG = 42;
     private final Handler ui = new Handler(Looper.getMainLooper());
     private final AtomicBoolean frame = new AtomicBoolean();
-    private List<Catalog.Episode> episodes = List.of();
-    private volatile String status = "Выберите видео";
+    private final AtomicInteger generation = new AtomicInteger();
+    private volatile List<Catalog.Series> catalog = List.of();
+    private List<Catalog.Episode> demos = List.of();
+    private volatile String notice = "";
+    private volatile Snapshot snapshot = new Snapshot(null, "Выберите видео", 0, 0, false, false, 1f, 1f);
     private volatile long format;
-    private int selection;
-    private int playing = -1;
+    private CinemaPanel panel;
+    private SharedPreferences preferences;
     private boolean foreground;
     private boolean playRequested;
+    private boolean autoNext;
+    private float volume;
+    private float speed;
     private ExoPlayer player;
+    private Catalog.Episode playing;
+    private String status = "";
     private SurfaceTexture texture;
     private Surface surface;
     private long timestamp;
+    private int seenGeneration;
+
+    record Snapshot(Catalog.Episode episode, String status, long position, long duration,
+                    boolean playing, boolean seekable, float volume, float speed) {}
+
+    private final Runnable tick = new Runnable() {
+        private int saves;
+        @Override public void run() {
+            publish();
+            if (++saves % 10 == 0) savePosition();
+            ui.postDelayed(this, 500);
+        }
+    };
 
     @Override public void onCreate(Bundle state) {
-        try {
-            episodes = new Catalog.Json().load(this);
-            if (episodes.isEmpty()) status = "Каталог пуст";
+        preferences = getSharedPreferences("cinema", MODE_PRIVATE);
+        autoNext = preferences.getBoolean("auto_next", true);
+        volume = preferences.getFloat("volume", 1f);
+        speed = preferences.getFloat("speed", 1f);
+        try (var input = getAssets().open("catalog.json")) {
+            demos = Catalog.Json.parse(Catalog.Json.read(input), true);
+            File imported = new File(getFilesDir(), "catalog.json");
+            if (imported.isFile()) {
+                try {
+                    var all = new ArrayList<>(new Catalog.Json().load(this));
+                    all.addAll(demos);
+                    catalog = Catalog.group(all);
+                } catch (Exception error) {
+                    catalog = Catalog.group(demos);
+                    notice = "Проверьте формат catalog.json";
+                }
+            } else {
+                catalog = Catalog.group(demos);
+            }
         } catch (Exception error) {
-            status = "Ошибка чтения каталога";
-            Log.w("AniartVR", status, error);
+            notice = "Ошибка загрузки каталога";
+            Log.w("AniartVR", notice, error);
         }
+        panel = new CinemaPanel(this, preferences);
+        publish();
         super.onCreate(state);
     }
 
@@ -56,15 +99,24 @@ public final class CinemaActivity extends NativeActivity {
         super.onResume();
         foreground = true;
         if (player != null && playRequested) player.play();
+        ui.removeCallbacks(tick);
+        ui.post(tick);
     }
 
     @Override protected void onPause() {
         foreground = false;
+        ui.removeCallbacks(tick);
+        savePosition();
         if (player != null) player.pause();
         super.onPause();
     }
 
-    // These methods are called from the OpenXR GL thread.
+    List<Catalog.Series> catalog() { return catalog; }
+    Snapshot snapshot() { return snapshot; }
+    String notice() { return notice; }
+    long positionFor(Catalog.Episode episode) { return preferences.getLong("resume:" + episode.key(), 0); }
+
+    // Called only on the OpenXR GL thread.
     public void openTexture(int name) {
         texture = new SurfaceTexture(name);
         texture.setOnFrameAvailableListener(ignored -> frame.set(true), ui);
@@ -73,13 +125,20 @@ public final class CinemaActivity extends NativeActivity {
     }
 
     public long latch(float[] transform) {
-        if (texture == null || !frame.getAndSet(false)) return 0;
+        int currentGeneration = generation.get();
+        if (currentGeneration != seenGeneration) {
+            seenGeneration = currentGeneration;
+            timestamp = 0;
+            return -1;
+        }
+        long currentFormat = format;
+        if (currentFormat == 0 || texture == null || !frame.getAndSet(false)) return 0;
         texture.updateTexImage();
         long next = texture.getTimestamp();
-        if (next == timestamp) return 0;
+        if (next == timestamp || currentGeneration != generation.get()) return 0;
         timestamp = next;
         texture.getTransformMatrix(transform);
-        return format;
+        return currentFormat;
     }
 
     public void closeTexture() {
@@ -93,102 +152,232 @@ public final class CinemaActivity extends NativeActivity {
         });
     }
 
-    public void command(int command) {
-        if (episodes.isEmpty()) return;
-        if (command == -1 || command == 1) {
-            selection = Math.floorMod(selection + command, episodes.size());
-        } else if (command == 0) {
-            int requested = selection;
-            ui.post(() -> play(requested));
+    public int renderConfig() { return panel.renderConfig(); }
+    public void command(int command) { panel.command(command); }
+    public void clickPanel(float x, float y) { panel.click(x, y); }
+    public void uploadPanel(float x, float y, boolean enhanced, float fps, float gpuMs) {
+        panel.upload(x, y, enhanced, fps, gpuMs);
+    }
+
+    void open(Catalog.Episode episode) { ui.post(() -> play(episode, true)); }
+    void toggle() { ui.post(this::togglePlayback); }
+    void step(long delta) {
+        ui.post(() -> {
+            if (player != null) seekTo(player.getCurrentPosition() + delta);
+        });
+    }
+    void seek(float fraction) {
+        ui.post(() -> {
+            if (player != null && player.getDuration() > 0) seekTo((long) (fraction * player.getDuration()));
+        });
+    }
+    void next(Catalog.Episode current) {
+        ui.post(() -> {
+            Catalog.Episode next = nextAfter(current);
+            if (next != null) play(next, true);
+        });
+    }
+    void setAutoNext(boolean enabled) { ui.post(() -> autoNext = enabled); }
+    void changeVolume(float delta) {
+        ui.post(() -> {
+            volume = Math.max(0f, Math.min(1f, volume + delta));
+            if (player != null) player.setVolume(volume);
+            preferences.edit().putFloat("volume", volume).apply();
+            publish();
+        });
+    }
+    void changeSpeed() {
+        ui.post(() -> {
+            speed = speed < 1.24f ? 1.25f : speed < 1.49f ? 1.5f : speed < 1.99f ? 2f : 1f;
+            if (player != null) player.setPlaybackSpeed(speed);
+            preferences.edit().putFloat("speed", speed).apply();
+            publish();
+        });
+    }
+
+    boolean canPlayNext(Catalog.Episode current) { return nextAfter(current) != null; }
+
+    private Catalog.Episode nextAfter(Catalog.Episode current) {
+        if (current == null) return null;
+        for (Catalog.Series series : catalog) {
+            if (!series.title().equals(current.title())) continue;
+            boolean found = false;
+            for (var section : series.episodes().entrySet()) {
+                if (found) {
+                    var variants = section.getValue();
+                    for (Catalog.Episode variant : variants) {
+                        if (variant.voice().equals(current.voice()) && variant.quality().equals(current.quality())) return variant;
+                    }
+                    for (Catalog.Episode variant : variants) {
+                        if (variant.voice().equals(current.voice())) return variant;
+                    }
+                    return variants.get(0);
+                }
+                found = section.getKey().equals(current.episode());
+            }
+            break;
         }
+        return null;
+    }
+
+    private void seekTo(long position) {
+        if (player != null && player.isCurrentMediaItemSeekable()) {
+            player.seekTo(Math.max(0, Math.min(position, player.getDuration())));
+            publish();
+        }
+    }
+
+    private void savePosition() {
+        if (player == null || playing == null || !player.isCurrentMediaItemSeekable()) return;
+        long position = player.getCurrentPosition();
+        long duration = player.getDuration();
+        long resume = duration > 0 && duration - position <= 5000 ? 0 : position;
+        preferences.edit().putLong("resume:" + playing.key(), resume).apply();
     }
 
     private void releasePlayer() {
         if (player != null) {
+            savePosition();
             player.release();
             player = null;
         }
+        frame.set(false);
         format = 0;
-        playing = -1;
+        generation.incrementAndGet();
+        playing = null;
         playRequested = false;
     }
 
-    private void play(int index) {
+    private void togglePlayback() {
+        if (player == null || playing == null) return;
+        if (player.getPlayerError() != null || player.getPlaybackState() == Player.STATE_ENDED) {
+            play(playing, false);
+            return;
+        }
+        playRequested = !playRequested;
+        player.setPlayWhenReady(foreground && playRequested);
+        publish();
+    }
+
+    private void play(Catalog.Episode episode, boolean resume) {
         if (surface == null) return;
-        if (playing == index && player != null && player.getPlayerError() == null
-                && player.getPlaybackState() != Player.STATE_ENDED) {
-            playRequested = !playRequested;
-            player.setPlayWhenReady(foreground && playRequested);
-            status = playRequested ? "Воспроизведение" : "Пауза";
+        if (resume && player != null && playing != null && playing.equals(episode)
+                && player.getPlaybackState() != Player.STATE_ENDED && player.getPlayerError() == null) {
+            playRequested = true;
+            player.setPlayWhenReady(foreground);
+            publish();
             return;
         }
         releasePlayer();
-        Catalog.Episode episode = episodes.get(index);
-        var http = new DefaultHttpDataSource.Factory()
-                .setDefaultRequestProperties(episode.headers());
-        player = new ExoPlayer.Builder(this)
-                .setMediaSourceFactory(new DefaultMediaSourceFactory(http)).build();
-        player.setVideoSurface(surface);
-        player.addListener(new Player.Listener() {
+        var http = new DefaultHttpDataSource.Factory().setDefaultRequestProperties(episode.headers());
+        var data = new DefaultDataSource.Factory(this, http);
+        ExoPlayer active = new ExoPlayer.Builder(this).setMediaSourceFactory(new DefaultMediaSourceFactory(data)).build();
+        player = active;
+        playing = episode;
+        playRequested = true;
+        status = "Загрузка";
+        active.setAudioAttributes(new AudioAttributes.Builder().setUsage(C.USAGE_MEDIA)
+                .setContentType(C.AUDIO_CONTENT_TYPE_MOVIE).build(), true);
+        active.setVideoSurface(surface);
+        active.setVolume(volume);
+        active.setPlaybackSpeed(speed);
+        active.addListener(new Player.Listener() {
             @Override public void onVideoSizeChanged(VideoSize size) {
-                int width = Math.round(size.width * size.pixelWidthHeightRatio);
-                format = ((long) width << 32) | (size.height & 0xffffffffL);
+                if (active != player || size.width <= 0 || size.height <= 0) return;
+                long scaledWidth = Math.max(1, Math.round(size.width * size.pixelWidthHeightRatio));
+                format = ((long) Math.min(size.width, 32767) << 48) | ((long) Math.min(size.height, 65535) << 32)
+                        | ((long) Math.min(scaledWidth, 65535) << 16) | Math.min(size.height, 65535);
+            }
+
+            @Override public void onEvents(Player source, Player.Events events) {
+                if (active == player) publish();
             }
 
             @Override public void onPlaybackStateChanged(int state) {
+                if (active != player) return;
                 status = switch (state) {
                     case Player.STATE_BUFFERING -> "Буферизация";
-                    case Player.STATE_READY -> playRequested ? "Воспроизведение" : "Пауза";
+                    case Player.STATE_READY -> "";
                     case Player.STATE_ENDED -> "Видео завершено";
-                    default -> "Ожидание";
+                    default -> "Загрузка";
                 };
+                if (state == Player.STATE_ENDED && autoNext && foreground) {
+                    Catalog.Episode next = nextAfter(episode);
+                    if (next != null) ui.post(() -> {
+                        if (active == player && active.getPlaybackState() == Player.STATE_ENDED) play(next, true);
+                    });
+                }
             }
 
             @Override public void onPlayerError(PlaybackException error) {
-                status = "Ошибка воспроизведения • " + error.getErrorCodeName();
-                Log.w("AniartVR", status);
+                if (active != player) return;
+                status = "Ошибка воспроизведения";
+                Log.w("AniartVR", error.getErrorCodeName());
+                publish();
             }
         });
-        player.addAnalyticsListener(new AnalyticsListener() {
+        active.addAnalyticsListener(new AnalyticsListener() {
             @Override public void onVideoDecoderInitialized(EventTime event, String name,
                     long initializedTimestampMs, long durationMs) {
                 Log.i("AniartVR", "Video decoder " + name);
             }
         });
-        player.setMediaItem(new MediaItem.Builder().setUri(episode.url())
-                .setMimeType(episode.hls() ? MimeTypes.APPLICATION_M3U8 : MimeTypes.VIDEO_MP4).build());
-        playing = index;
-        playRequested = true;
-        status = "Загрузка";
-        player.prepare();
-        player.setPlayWhenReady(foreground);
+        MediaItem item = new MediaItem.Builder().setUri(episode.url())
+                .setMimeType(episode.hls() ? MimeTypes.APPLICATION_M3U8 : MimeTypes.VIDEO_MP4).build();
+        long position = resume ? positionFor(episode) : 0;
+        active.setMediaItem(item, position > 0 ? position : C.TIME_UNSET);
+        active.prepare();
+        active.setPlayWhenReady(foreground);
+        publish();
     }
 
-    public void uploadPanel(boolean fast, float fps, float gpuMs) {
-        Bitmap panel = Bitmap.createBitmap(1024, 320, Bitmap.Config.ARGB_8888);
-        Canvas canvas = new Canvas(panel);
-        canvas.drawColor(Color.rgb(21, 26, 43));
-        TextPaint paint = new TextPaint(Paint.ANTI_ALIAS_FLAG);
-        line(canvas, paint, "Aniart VR  /  Каталог", 51, 26, 0xffb2a3ff);
-        if (!episodes.isEmpty()) {
-            Catalog.Episode episode = episodes.get(selection);
-            line(canvas, paint, episode.title(), 113, 46, Color.WHITE);
-            line(canvas, paint, episode.episode() + "   ·   " + episode.voice() + "   ·   "
-                    + episode.quality() + "                         " + (selection + 1) + "/" + episodes.size(),
-                    157, 26, 0xffd7dcef);
-        }
-        String timing = gpuMs < 0 ? "" : String.format(java.util.Locale.ROOT, "   GPU Anime4K %.1f ms", gpuMs);
-        line(canvas, paint, status + "   /   " + (fast ? "Anime4K CNN x2 S" : "2D")
-                + String.format(java.util.Locale.ROOT, "   %.0f FPS", fps) + timing, 227, 24, 0xffb2a3ff);
-        line(canvas, paint, "Курки  ← →     A  Смотреть / пауза     B  Anime4K     X  Каталог     Y  Экран",
-                286, 24, Color.WHITE);
-        GLUtils.texImage2D(android.opengl.GLES20.GL_TEXTURE_2D, 0, panel, 0);
-        panel.recycle();
+    private void publish() {
+        snapshot = new Snapshot(playing, status, player == null ? 0 : player.getCurrentPosition(),
+                player == null ? 0 : Math.max(0, player.getDuration()),
+                player != null && playRequested && player.getPlaybackState() != Player.STATE_ENDED
+                        && player.getPlayerError() == null,
+                player != null && player.isCurrentMediaItemSeekable(), volume, speed);
     }
 
-    private static void line(Canvas canvas, TextPaint paint, String value, int y, int size, int color) {
-        paint.setTextSize(size);
-        paint.setColor(color);
-        canvas.drawText(TextUtils.ellipsize(value, paint, 960, TextUtils.TruncateAt.END).toString(), 32, y, paint);
+    void pickCatalog() {
+        ui.post(() -> {
+            try {
+                Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+                intent.setType("*/*");
+                intent.addCategory(Intent.CATEGORY_OPENABLE);
+                startActivityForResult(intent, IMPORT_CATALOG);
+            } catch (RuntimeException error) {
+                notice = "Нет файлового менеджера. Загрузите catalog.json через ADB";
+            }
+        });
+    }
+
+    @Override protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+        super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode != IMPORT_CATALOG || resultCode != RESULT_OK || data == null || data.getData() == null) return;
+        var uri = data.getData();
+        new Thread(() -> {
+            try (var stream = getContentResolver().openInputStream(uri)) {
+                byte[] bytes = Catalog.Json.read(stream);
+                var all = new ArrayList<>(Catalog.Json.parse(bytes, false));
+                int imported = all.size();
+                all.addAll(demos);
+                List<Catalog.Series> groups = Catalog.group(all);
+                AtomicFile file = new AtomicFile(new File(getFilesDir(), "catalog.json"));
+                FileOutputStream output = file.startWrite();
+                try {
+                    output.write(bytes);
+                    file.finishWrite(output);
+                } catch (Exception error) {
+                    file.failWrite(output);
+                    throw error;
+                }
+                catalog = groups;
+                notice = "Импортировано записей: " + imported;
+            } catch (Exception error) {
+                notice = "Проверьте формат catalog.json";
+                Log.w("AniartVR", notice, error);
+            }
+        }, "Catalog import").start();
     }
 }
