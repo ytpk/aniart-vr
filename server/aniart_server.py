@@ -63,13 +63,13 @@ def commands(args, source):
 
     encoder = ["ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error", "-filter_threads", "2"]
     if args.encode_device:
-        encoder += ["-vaapi_device", args.encode_device]
+        encoder += ["-init_hw_device", f"vaapi=encoder:{args.encode_device}", "-filter_hw_device", "encoder"]
     encoder += ["-f", "rawvideo", "-pixel_format", "rgb24", "-video_size",
                 f"{args.width if args.half_sbs else args.width * 2}x{args.height}", "-framerate", str(args.fps), "-i", "pipe:0"]
     encoder += source + ["-map", "0:v", "-map", "1:a:0?", "-c:a", "aac", "-b:a", "160k"]
     sar = "setsar=2" if args.half_sbs else "setsar=1"
     if args.encode_device:
-        encoder += ["-vf", sar + ",format=nv12,hwupload", "-c:v", "h264_vaapi"]
+        encoder += ["-vf", sar + ",format=nv12,hwupload", "-c:v", "h264_vaapi", "-pix_fmt", "vaapi"]
     else:
         encoder += ["-vf", sar, "-c:v", "libx264", "-threads", "4", "-preset", "veryfast", "-tune", "zerolatency", "-pix_fmt", "yuv420p"]
     encoder += ["-b:v", args.bitrate, "-g", str(args.fps), "-bf", "0", "-shortest", "-f", "mpegts", "pipe:1"]
