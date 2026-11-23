@@ -46,3 +46,19 @@ python server/aniart_server.py --host "$PC_IP" --checkpoint models/Limbo.safeten
 По умолчанию выход **2560×720 SBS, 24 FPS**, глубина 504×280 раз в два кадра. Для источников 8-bit H.264 можно отдельно попробовать аппаратный декодер `--decode-device /dev/dri/renderD128`. Для 4K SBS попробуйте `--width 3840 --height 2160 --half-sbs --bitrate 28M`. Quest получит единый кадр 3840×2160, по 1920×2160 на глаз с SAR 2:1. Это тестовый режим без замера на RX 9060 XT.
 
 Для отладки можно убрать `--encode-device` и использовать libx264, отключить Vulkan через `--no-anime4k` или выбрать `--device cpu`. Сервер пишет время до первой выдачи и среднюю скорость обработки. Текущая версия рассчитана на материал 16:9. Она открывает источник отдельно для видео и звука, отдаёт первый звуковой поток и начинает воспроизведение с начала. Перемотка и переключение дорожки внутри обработанного потока пока не реализованы.
+
+## Запуск без PyTorch и ROCm
+
+Готовый Limbo ONNX запускается на CPU через ONNX Runtime. Anime4K через Vulkan и VAAPI-кодирование по-прежнему можно использовать на Radeon. Этот режим подходит для проверки связи Quest с сервером. Скорость 24 FPS с глубиной на Ryzen 5 5600 пока не измерена.
+
+Команды из папки `server` в Python 3.12:
+
+```sh
+python -m pip install onnxruntime==1.24.3 numpy opencv-python-headless
+mkdir -p models
+curl -fL 'https://raw.githubusercontent.com/NevermindNilas/Ai-models/4c0950ecc08629cda85754d0766d6deb2e95495a/Limbo-V3/Limbo_504x280_fp32.onnx' -o models/Limbo.onnx
+printf '%s  %s\n' '6a8f894f08fdb651036c3e6875bf357574b03003a4da2ae1ca9e82b66fc8534f' models/Limbo.onnx | sha256sum -c -
+python aniart_server.py --host "$PC_IP" --checkpoint models/Limbo.onnx --depth-every 6 --encode-device /dev/dri/renderD128
+```
+
+Задайте `PC_IP` и `ANIART_PC_TOKEN` как в разделе запуска. ONNX фиксирован на 504×280. Отключите `--encode-device`, если кодирование VAAPI ещё не настроено.

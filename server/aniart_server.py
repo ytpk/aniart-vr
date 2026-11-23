@@ -17,7 +17,7 @@ from urllib.parse import urlsplit
 
 import numpy as np
 
-from depth import Limbo, Stereo
+from depth import Limbo, OnnxLimbo, Stereo
 
 
 def source_request(body):
@@ -225,7 +225,7 @@ def main():
     parser.add_argument("--checkpoint", required=True)
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8765)
-    parser.add_argument("--device", choices=("cpu", "cuda"), default="cuda")
+    parser.add_argument("--device", choices=("cpu", "cuda"), help="ONNX defaults to CPU, safetensors defaults to ROCm")
     parser.add_argument("--vulkan-device", type=int, default=0)
     parser.add_argument("--decode-device")
     parser.add_argument("--encode-device")
@@ -249,7 +249,13 @@ def main():
             or any(d < 28 or d > 896 or d % 14 for d in (args.depth_width, args.depth_height))):
         parser.error("Invalid output size, FPS, depth size, interval or strength")
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
-    model = Limbo(args.checkpoint, args.device)
+    if Path(args.checkpoint).suffix.lower() == ".onnx":
+        if args.device == "cuda":
+            parser.error("ONNX Limbo uses CPU; omit --device or use --device cpu")
+        model = OnnxLimbo(args.checkpoint, args.depth_width, args.depth_height)
+        logging.info("Depth: Limbo V3 / ONNX Runtime CPU")
+    else:
+        model = Limbo(args.checkpoint, args.device or "cuda")
     with Server(args, model) as server:
         logging.info("Listening on %s:%d", args.host, args.port)
         server.serve_forever()
