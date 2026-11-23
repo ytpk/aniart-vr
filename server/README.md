@@ -6,7 +6,15 @@
 
 1. Установите драйвер и PyTorch с ROCm по инструкции AMD для вашей системы и **RX 9060 XT / gfx1200**. Установите также совместимую версию torchvision. `torch.cuda` — имя API PyTorch для GPU, в том числе HIP на AMD. [Матрица AMD](https://rocm.docs.amd.com/projects/radeon-ryzen/en/latest/docs/compatibility/compatibilityrad/native_linux/native_linux_compatibility.html)
 2. Нужен FFmpeg с фильтром `libplacebo` и драйвер Vulkan. Для аппаратного кодирования нужен `h264_vaapi` и устройство Mesa VAAPI. Проверьте `ffmpeg -filters`, `ffmpeg -encoders`, `vulkaninfo --summary` и `vainfo --display drm --device /dev/dri/renderD128`.
-3. В Python-окружении с установленными PyTorch и torchvision запустите команды из корня репозитория.
+3. Используйте Python 3.12. Зафиксированный коммит DA3 поддерживает Python до 3.13 включительно. На Manjaro с системным Python 3.14 можно создать отдельное окружение через uv.
+
+```sh
+uv venv --seed --python 3.12 .venv-rocm
+source .venv-rocm/bin/activate
+python -m pip install 'torch==2.14.1+rocm7.2' 'torchvision==0.29.1+rocm7.2' --index-url https://download.pytorch.org/whl/rocm7.2
+```
+
+Запустите команды из корня репозитория.
 
 ```sh
 python -m pip install -r server/requirements.txt
