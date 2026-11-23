@@ -153,7 +153,8 @@ class Handler(BaseHTTPRequestHandler):
     def stream(self, source):
         args = self.server.args
         decoder_cmd, encoder_cmd = commands(args, source)
-        decoder = subprocess.Popen(decoder_cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+        stderr = None if args.ffmpeg_log else subprocess.DEVNULL
+        decoder = subprocess.Popen(decoder_cmd, stdout=subprocess.PIPE, stderr=stderr,
                                    cwd=Path(__file__).resolve().parents[1])
         encoder = None
         writer = None
@@ -187,7 +188,7 @@ class Handler(BaseHTTPRequestHandler):
                 encoder.stdin.close()
 
         try:
-            encoder = subprocess.Popen(encoder_cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+            encoder = subprocess.Popen(encoder_cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=stderr)
             writer = threading.Thread(target=produce)
             writer.start()
             chunk = encoder.stdout.read1(65536)
@@ -238,6 +239,7 @@ def main():
     parser.add_argument("--depth-every", type=int, default=2)
     parser.add_argument("--strength", type=float, default=.022)
     parser.add_argument("--bitrate", default="12M")
+    parser.add_argument("--ffmpeg-log", action="store_true", help="Show FFmpeg errors in the terminal")
     parser.add_argument("--no-anime4k", action="store_false", dest="anime4k")
     args = parser.parse_args()
     args.token = os.environ.get("ANIART_PC_TOKEN", "")
