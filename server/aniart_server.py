@@ -3,7 +3,7 @@
 
 import argparse
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import suppress
+from contextlib import ExitStack, suppress
 from dataclasses import dataclass
 import hmac
 import json
@@ -12,8 +12,10 @@ import os
 from pathlib import Path
 import re
 import secrets
+import select
 import socket
 import subprocess
+from tempfile import TemporaryFile
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -21,6 +23,7 @@ from urllib.parse import urlsplit
 
 import numpy as np
 
+from dash import Dash, probe_dash
 from depth import Layers, Limbo, OnnxLimbo, Stereo
 
 
@@ -74,7 +77,24 @@ def playback_options(defaults, body):
     return options
 
 
-def commands(args, source, mode="sbs"):
+def dash_source(stack, manifest, original):
+    spool = stack.enter_context(TemporaryFile())
+    spool.write(manifest)
+    spool.seek(0)
+    fd = spool.fileno()
+    options = original[:-2]
+    whitelist = options.index("-protocol_whitelist") + 1
+    options[whitelist] += ",pipe"
+    return [*options, "-f", "dash", "-i", f"pipe:{fd}"], (fd,)
+
+
+def seek_source(source, start_ms):
+    if start_ms:
+        return [*source[:-2], "-ss", f"{start_ms / 1000:.3f}", *source[-2:]]
+    return source
+
+
+def commands(args, source, mode="sbs", audio_source=None):
     decoder = ["ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error", "-filter_threads", "2"]
     if args.anime4k and args.vulkan_device is not None:
         decoder += ["-init_hw_device", f"vulkan=shader:{args.vulkan_device}", "-filter_hw_device", "shader"]
@@ -103,7 +123,7 @@ def commands(args, source, mode="sbs"):
     height = args.height + Layers.BAND_HEIGHT if mode == "layers" else args.height
     encoder += ["-f", "rawvideo", "-pixel_format", "rgb24", "-video_size",
                 f"{width}x{height}", "-framerate", str(args.fps), "-i", "pipe:0"]
-    encoder += source + ["-map", "0:v", "-map", "1:a:0?", "-c:a", "aac", "-b:a", "160k"]
+    encoder += (source if audio_source is None else audio_source) + ["-map", "0:v", "-map", "1:a:0?", "-c:a", "aac", "-b:a", "160k"]
     sar = "setsar=2" if mode == "sbs" and args.half_sbs else "setsar=1"
     if args.encode_device:
         encoder += ["-vf", sar + ",format=nv12,hwupload", "-c:v", "h264_vaapi", "-pix_fmt", "vaapi"]
@@ -120,6 +140,7 @@ class Job:
     options: argparse.Namespace
     duration_ms: int
     expires_at: float
+    dash: Dash
 
 
 class Server(ThreadingHTTPServer):
@@ -163,10 +184,24 @@ class Handler(BaseHTTPRequestHandler):
             if mode not in ("sbs", "layers") or type(seekable) is not bool:
                 raise ValueError()
             options = playback_options(self.server.args, body)
+            is_dash = urlsplit(source[-1]).path.lower().endswith(".mpd")
         except (ValueError, KeyError, TypeError, AttributeError):
             self.send_error(400, "Invalid stream request")
             return
-        duration_ms = probe_duration(source) if seekable else 0
+        started = time.monotonic()
+        with self.server.lock:
+            previous = next((job for job in self.server.jobs.values()
+                             if job.source == source and job.duration_ms and job.expires_at > started), None)
+        dash = previous.dash if previous and previous.dash.duration_ms else Dash()
+        if is_dash and not dash.duration_ms:
+            dash = probe_dash(source[-1], body.get("headers", {}))
+        duration_ms = dash.duration_ms
+        if seekable and not duration_ms:
+            duration_ms = previous.duration_ms if previous and previous.duration_ms else probe_duration(source)
+        if is_dash or seekable:
+            logging.info("Source | duration %s | %s | metadata in %.2f s",
+                         f"{duration_ms / 1000:.3f} s" if duration_ms else "unknown",
+                         "DASH tracks" if dash.video else "original input", time.monotonic() - started)
         now = time.monotonic()
         key = secrets.token_urlsafe(18)
         with self.server.lock:
@@ -178,7 +213,7 @@ class Handler(BaseHTTPRequestHandler):
                     self.send_error(429)
                     return
                 del jobs[min(jobs, key=lambda job_id: jobs[job_id].expires_at)]
-            jobs[key] = Job(source, mode, options, duration_ms, now + 120)
+            jobs[key] = Job(source, mode, options, duration_ms, now + 120, dash)
         response = json.dumps({"path": f"/v1/streams/{key}.ts", "stereo": mode,
                                "duration_ms": duration_ms, "height": options.height,
                                "anime4k": options.anime4k, "depth_every": options.depth_every,
@@ -211,22 +246,24 @@ class Handler(BaseHTTPRequestHandler):
         if not self.server.viewer.acquire(timeout=5 if offset is not None else 0):
             self.send_error(503, "Another stream is closing or active")
             return
+        interrupted = threading.Event()
         try:
             with self.server.lock:
                 job.expires_at = float("inf")
-            self.stream(job, start_ms)
+            result = self.stream(job, start_ms, interrupted, split_dash=bool(job.dash.video))
+            if result is False and job.dash.video and not interrupted.is_set():
+                logging.warning("DASH track startup failed; retrying original input")
+                result = self.stream(job, start_ms, interrupted)
+            if result is False and not interrupted.is_set():
+                self.send_error(502, "No output from FFmpeg; check source, Vulkan and VAAPI")
         finally:
             with self.server.lock:
                 self.server.interrupt_viewer = None
                 job.expires_at = time.monotonic() + (7200 if job.duration_ms else 120)
             self.server.viewer.release()
 
-    def stream(self, job, start_ms):
+    def stream(self, job, start_ms, interrupted, split_dash=False):
         args = job.options
-        source = job.source
-        if start_ms:
-            source = [*source[:-2], "-ss", f"{start_ms / 1000:.3f}", *source[-2:]]
-        decoder_cmd, encoder_cmd = commands(args, source, job.mode)
         stderr = None if args.ffmpeg_log else subprocess.DEVNULL
         decoder = None
         encoder = None
@@ -242,6 +279,7 @@ class Handler(BaseHTTPRequestHandler):
                         process.kill()
 
         def interrupt():
+            interrupted.set()
             stop_processes()
             with suppress(OSError):
                 self.connection.shutdown(socket.SHUT_RDWR)
@@ -274,6 +312,8 @@ class Handler(BaseHTTPRequestHandler):
                     raw = decoder.stdout.read(frame_bytes)
                     if len(raw) != frame_bytes or stopping.is_set():
                         return None
+                    if source_index == 0:
+                        logging.info("First decoded frame in %.2f s", time.monotonic() - started)
                     frame = np.frombuffer(raw, np.uint8).reshape(args.height, args.width, 3)
                     current = frame[::32, ::32].astype(np.float32)
                     cut = sample is None or np.abs(current - sample).mean() > 28
@@ -338,20 +378,32 @@ class Handler(BaseHTTPRequestHandler):
 
         try:
             with self.server.lock:
+                if interrupted.is_set():
+                    return
                 self.server.interrupt_viewer = interrupt
-            decoder = subprocess.Popen(decoder_cmd, stdout=subprocess.PIPE, stderr=stderr,
-                                       cwd=Path(__file__).resolve().parents[1])
-            encoder = subprocess.Popen(encoder_cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=stderr)
+            with ExitStack() as spool:
+                video, audio = job.source, job.source
+                video_fds, audio_fds = (), ()
+                if split_dash:
+                    video, video_fds = dash_source(spool, job.dash.video, job.source)
+                    audio, audio_fds = dash_source(spool, job.dash.audio, job.source)
+                decoder_cmd, encoder_cmd = commands(args, seek_source(video, start_ms), job.mode,
+                                                    seek_source(audio, start_ms))
+                decoder = subprocess.Popen(decoder_cmd, stdout=subprocess.PIPE, stderr=stderr, pass_fds=video_fds,
+                                           cwd=Path(__file__).resolve().parents[1])
+                encoder = subprocess.Popen(encoder_cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=stderr,
+                                           pass_fds=audio_fds)
             if stopping.is_set():
                 return
             writer = threading.Thread(target=produce)
             writer.start()
+            if split_dash and not select.select([encoder.stdout], [], [], 12)[0]:
+                return False
             chunk = encoder.stdout.read1(65536)
-            if stopping.is_set() and not chunk:
+            if interrupted.is_set():
                 return
             if not chunk:
-                self.send_error(502, "No output from FFmpeg; check video, Vulkan and VAAPI")
-                return
+                return False
             logging.info("PC %s | picture %dx%d | Anime4K %s | depth every %d | refine %s",
                          job.mode, args.width, args.height, "on" if args.anime4k else "off",
                          args.depth_every, "on" if args.depth_refine else "off")
@@ -364,6 +416,7 @@ class Handler(BaseHTTPRequestHandler):
             while chunk:
                 self.wfile.write(chunk)
                 chunk = encoder.stdout.read1(65536)
+            return True
         except (BrokenPipeError, ConnectionResetError, TimeoutError):
             pass
         finally:
