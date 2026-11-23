@@ -41,7 +41,7 @@ def source_request(body):
 
 def commands(args, source):
     decoder = ["ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error", "-filter_threads", "2"]
-    if args.anime4k:
+    if args.anime4k and args.vulkan_device is not None:
         decoder += ["-init_hw_device", f"vulkan=shader:{args.vulkan_device}", "-filter_hw_device", "shader"]
     if args.decode_device:
         decoder += ["-hwaccel", "vaapi", "-hwaccel_device", args.decode_device, "-hwaccel_output_format", "vaapi"]
@@ -52,10 +52,10 @@ def commands(args, source):
     if args.anime4k:
         # Anime4K's hook runs only when both target dimensions exceed the input by 20%.
         # Keep it active on same-resolution requests, then resize to the advertised frame.
-        filters += ["format=yuv420p", "hwupload",
-                    f"libplacebo=w='max(iw*1.25,{args.width})':h='max(ih*1.25,{args.height})'"
+        # Let libplacebo upload and download the frames it passes through Vulkan.
+        filters += [f"libplacebo=w='max(iw*1.25,{args.width})':h='max(ih*1.25,{args.height})'"
                     ":format=yuv420p:custom_shader_path=Anime4K_Upscale_CNN_x2_S.glsl",
-                    "hwdownload", "format=yuv420p", f"scale={size}"]
+                    f"scale={size}"]
     else:
         filters += [f"scale={size}"]
     filters += [f"fps={args.fps}", "format=rgb24"]
@@ -227,7 +227,7 @@ def main():
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--device", choices=("cpu", "cuda"), help="ONNX defaults to CPU, safetensors defaults to ROCm")
-    parser.add_argument("--vulkan-device", type=int, default=0)
+    parser.add_argument("--vulkan-device", type=int, help="Vulkan device index; by default libplacebo selects one")
     parser.add_argument("--decode-device")
     parser.add_argument("--encode-device")
     parser.add_argument("--width", type=int, default=1280, help="Per-eye width")
