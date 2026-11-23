@@ -91,13 +91,13 @@ payload=$(printf '{"url":"http://127.0.0.1:%s/bunny.mp4"}' "$source_port")
 token=$("$python_bin" -c 'import secrets; print(secrets.token_urlsafe(24))') || exit 1
 
 run_profile() {
-    local name=$1 port status response path stream_code attempt ready=false
-    shift
+    local name=$1 interval=$2 port status response path stream_code attempt ready=false
+    shift 2
     printf '\n=== %s ===\n' "$name" | tee -a "$reports/summary.txt"
     port=$("$python_bin" -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])') || return
     local base="http://127.0.0.1:$port"
     local log="$reports/$name.server.log"
-    ANIART_PC_TOKEN="$token" setsid "$python_bin" -u "$script_dir/aniart_server.py"         --host 127.0.0.1 --port "$port" --checkpoint "$checkpoint" --depth-every 6 --ffmpeg-log         "$@" >"$log" 2>&1 &
+    ANIART_PC_TOKEN="$token" setsid "$python_bin" -u "$script_dir/aniart_server.py"         --host 127.0.0.1 --port "$port" --checkpoint "$checkpoint" --depth-every "$interval" --ffmpeg-log         "$@" >"$log" 2>&1 &
     server_pid=$!
     for ((attempt=0; attempt<100; attempt++)); do
         if ! kill -0 "$server_pid" 2>/dev/null; then break; fi
@@ -129,13 +129,20 @@ run_profile() {
     cat "$reports/$name.curl.txt" | tee -a "$reports/summary.txt"
     ffprobe -v error -count_frames -show_entries stream=codec_name,width,height,avg_frame_rate,nb_read_frames         -of compact "$run_dir/video/$name.ts" >"$reports/$name.ffprobe.txt" 2>&1
     stop_server
-    grep -E 'First output in|Processed [0-9]+ frames' "$log" | tee -a "$reports/summary.txt"
+    grep -E 'First output in|Processed [0-9]+ frames|Depth timing' "$log" | tee -a "$reports/summary.txt"
 }
 
-run_profile 01-baseline --no-anime4k
-run_profile 02-vaapi --no-anime4k --encode-device "$device"
-run_profile 03-anime4k
-run_profile 04-anime4k-vaapi --encode-device "$device"
+if [[ "${ANIART_DEPTH_SWEEP:-0}" == 1 ]]; then
+    for interval in 6 3 2; do
+        run_profile "depth-every-$interval" "$interval" --encode-device "$device"
+    done
+    exit 0
+fi
+
+run_profile 01-baseline 6 --no-anime4k
+run_profile 02-vaapi 6 --no-anime4k --encode-device "$device"
+run_profile 03-anime4k 6
+run_profile 04-anime4k-vaapi 6 --encode-device "$device"
 
 run_vulkan_probe() {
     local name=$1 filter=$2

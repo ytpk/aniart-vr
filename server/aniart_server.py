@@ -166,6 +166,8 @@ class Handler(BaseHTTPRequestHandler):
                 stereo = Stereo(args.width, args.height, args.strength, args.half_sbs)
                 sample = None
                 frame_id = 0
+                depth_count = 0
+                depth_seconds = 0.0
                 frame_bytes = args.width * args.height * 3
                 while not stopping.is_set():
                     raw = decoder.stdout.read(frame_bytes)
@@ -176,12 +178,17 @@ class Handler(BaseHTTPRequestHandler):
                     cut = sample is None or np.abs(current - sample).mean() > 28
                     sample = current
                     if cut or frame_id % args.depth_every == 0:
+                        depth_started = time.monotonic()
                         prediction = self.server.model(frame, args.depth_width, args.depth_height)
                         stereo.update(prediction, cut)
+                        depth_seconds += time.monotonic() - depth_started
+                        depth_count += 1
                     encoder.stdin.write(stereo.render(frame).tobytes())
                     frame_id += 1
                     if frame_id % 120 == 0:
                         logging.info("Processed %d frames at %.1f fps", frame_id, frame_id / (time.monotonic() - started))
+                        logging.info("Depth timing: %d maps for %d frames | %.1f ms per map",
+                                     depth_count, frame_id, depth_seconds * 1000 / depth_count)
             except (BrokenPipeError, ValueError, RuntimeError, OSError) as error:
                 logging.warning("Frame processing stopped (%s)", type(error).__name__)
             finally:
