@@ -10,11 +10,14 @@
 
 ```sh
 python -m pip install -r server/requirements.txt
+python -m pip install --no-deps 'e3nn==0.6.0' 'opt-einsum-fx==0.1.4'
 python -m pip install --no-deps 'git+https://github.com/ByteDance-Seed/Depth-Anything-3.git@3d835ec1a5802d64a8b8b15f817a1ab54809bfe4'
 mkdir -p models
 curl -fL 'https://raw.githubusercontent.com/NevermindNilas/Ai-models/4c0950ecc08629cda85754d0766d6deb2e95495a/Limbo-V3/Limbo.safetensors' -o models/Limbo.safetensors
 echo '8aa1dccf97bd7f1bca7d051ffa983dfe6faeed2356ba5eb9db63808d49f036f3  models/Limbo.safetensors' | sha256sum -c -
 ```
+
+Если терминал уже открыт в папке `server`, используйте `requirements.txt` вместо `server/requirements.txt`. Файл устанавливает обычные Python-библиотеки. Пакеты `e3nn` и `opt-einsum-fx` устанавливаются отдельно с `--no-deps`, чтобы использовать уже установленный PyTorch с ROCm. После установки проверьте `python -m pip check` и `python -c 'import torch; print(torch.version.hip, torch.cuda.is_available())'`.
 
 Limbo V3 от NevermindNilas выбрана первой для аниме. Оригинальные веса CC BY-NC 4.0 происходят от DA3 Small. Пользовательский сервер рассчитан на некоммерческий домашний просмотр. [Модель и лицензия](https://github.com/NevermindNilas/Ai-models/tree/4c0950ecc08629cda85754d0766d6deb2e95495a/Limbo-V3)
 

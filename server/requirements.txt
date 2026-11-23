@@ -1,6 +1,7 @@
 addict
 einops
-e3nn
+opt-einsum
+sympy
 huggingface-hub
 numpy
 omegaconf
