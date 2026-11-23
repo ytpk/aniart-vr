@@ -40,7 +40,6 @@ def source_request(body):
 
 
 def commands(args, source):
-    shader = Path(__file__).resolve().parents[1] / "Anime4K_Upscale_CNN_x2_S.glsl"
     decoder = ["ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error", "-filter_threads", "2"]
     if args.anime4k:
         decoder += ["-init_hw_device", f"vulkan=shader:{args.vulkan_device}", "-filter_hw_device", "shader"]
@@ -51,9 +50,12 @@ def commands(args, source):
     if args.decode_device:
         filters += ["hwdownload", "format=nv12"]
     if args.anime4k:
+        # Anime4K's hook runs only when both target dimensions exceed the input by 20%.
+        # Keep it active on same-resolution requests, then resize to the advertised frame.
         filters += ["format=yuv420p", "hwupload",
-                    f"libplacebo=w={args.width}:h={args.height}:format=yuv420p:custom_shader_path='{shader}'",
-                    "hwdownload", "format=yuv420p"]
+                    f"libplacebo=w='max(iw*1.25,{args.width})':h='max(ih*1.25,{args.height})'"
+                    ":format=yuv420p:custom_shader_path=Anime4K_Upscale_CNN_x2_S.glsl",
+                    "hwdownload", "format=yuv420p", f"scale={size}"]
     else:
         filters += [f"scale={size}"]
     filters += [f"fps={args.fps}", "format=rgb24"]
@@ -151,7 +153,8 @@ class Handler(BaseHTTPRequestHandler):
     def stream(self, source):
         args = self.server.args
         decoder_cmd, encoder_cmd = commands(args, source)
-        decoder = subprocess.Popen(decoder_cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+        decoder = subprocess.Popen(decoder_cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                   cwd=Path(__file__).resolve().parents[1])
         encoder = None
         writer = None
         stopping = threading.Event()
