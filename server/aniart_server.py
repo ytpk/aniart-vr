@@ -166,7 +166,7 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 if args.depth_preview:
                     preview = open(args.depth_preview, "xb")
-                stereo = Stereo(args.width, args.height, args.strength, args.half_sbs)
+                stereo = Stereo(args.width, args.height, args.strength, args.half_sbs, args.depth_refine)
                 sample = None
                 frame_id = 0
                 depth_count = 0
@@ -189,7 +189,7 @@ class Handler(BaseHTTPRequestHandler):
                         depth_seconds += time.monotonic() - depth_started
                         depth_count += 1
                         if preview:
-                            preview_map = stereo.preview().tobytes()
+                            preview_map = stereo.preview(args.depth_preview_full).tobytes()
                     warp_started = time.monotonic()
                     sbs = stereo.render(frame)
                     warp_seconds += time.monotonic() - warp_started
@@ -261,6 +261,8 @@ def main():
     parser.add_argument("--depth-every", type=int, default=2)
     parser.add_argument("--strength", type=float, default=.022)
     parser.add_argument("--bitrate", default="12M")
+    parser.add_argument("--depth-refine", action="store_true", help="Refine the depth map using full-resolution image edges")
+    parser.add_argument("--depth-preview-full", action="store_true", help="Write depth preview at per-eye video resolution")
     parser.add_argument("--depth-preview", type=Path, help="Write one raw gray depth map per output frame for benchmarking")
     parser.add_argument("--ffmpeg-log", action="store_true", help="Show FFmpeg errors in the terminal")
     parser.add_argument("--no-anime4k", action="store_false", dest="anime4k")

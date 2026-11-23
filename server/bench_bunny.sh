@@ -97,9 +97,14 @@ run_profile() {
     port=$("$python_bin" -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])') || return
     local base="http://127.0.0.1:$port"
     local log="$reports/$name.server.log"
-    local raw="$run_dir/input/$name.gray"
+    local raw="$run_dir/input/$name.gray" preview_size=504x280 preview_scale=504:280
     if [[ "${ANIART_DEPTH_PREVIEW:-0}" == 1 ]]; then
         set -- "$@" --depth-preview "$raw"
+        if [[ "${ANIART_DEPTH_REFINE_SWEEP:-0}" == 1 ]]; then
+            set -- "$@" --depth-preview-full
+            preview_size=1280x720
+            preview_scale=1280:720
+        fi
     fi
     ANIART_PC_TOKEN="$token" setsid "$python_bin" -u "$script_dir/aniart_server.py"         --host 127.0.0.1 --port "$port" --checkpoint "$checkpoint" --depth-every "$interval" --ffmpeg-log         "$@" >"$log" 2>&1 &
     server_pid=$!
@@ -136,9 +141,9 @@ run_profile() {
     grep -E 'First output in|Processed [0-9]+ frames|Depth timing|Stereo warp timing' "$log" | tee -a "$reports/summary.txt"
     if [[ -s "$raw" ]]; then
         if ffmpeg -nostdin -hide_banner -loglevel error -i "$run_dir/input/bunny.mp4" \
-            -f rawvideo -pixel_format gray -video_size 504x280 -framerate 24 -i "$raw" \
+            -f rawvideo -pixel_format gray -video_size "$preview_size" -framerate 24 -i "$raw" \
             -filter_complex_threads 2 \
-            -filter_complex '[0:v]fps=24,scale=504:280,setsar=1,format=yuv420p[video];[1:v]setsar=1,format=yuv420p[depth];[video][depth]hstack=shortest=1' \
+            -filter_complex "[0:v]fps=24,scale=$preview_scale,setsar=1,format=yuv420p[video];[1:v]setsar=1,format=yuv420p[depth];[video][depth]hstack=shortest=1" \
             -an -c:v libx264 -preset fast -crf 19 -movflags +faststart "$run_dir/video/$name-depth.mp4" \
             >"$reports/$name.preview.log" 2>&1; then
             rm -- "$raw"
@@ -146,6 +151,13 @@ run_profile() {
         fi
     fi
 }
+
+if [[ "${ANIART_DEPTH_REFINE_SWEEP:-0}" == 1 ]]; then
+    depth_device=${ANIART_BENCH_DEPTH_DEVICE:-webgpu}
+    run_profile depth-720p-linear 1 --encode-device "$device" --device "$depth_device"
+    run_profile depth-720p-refined 1 --encode-device "$device" --device "$depth_device" --depth-refine
+    exit 0
+fi
 
 if [[ "${ANIART_DEPTH_SWEEP:-0}" == 1 ]]; then
     for interval in 6 3 2 1; do

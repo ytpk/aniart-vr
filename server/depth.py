@@ -77,13 +77,14 @@ class OnnxLimbo:
 
 
 class Stereo:
-    def __init__(self, width, height, strength, half_sbs):
+    def __init__(self, width, height, strength, half_sbs, refine=False):
         import cv2
 
         self.cv = cv2
         self.width = width
         self.height = height
         self.half_sbs = half_sbs
+        self.refine = refine
         self.x, self.y = np.meshgrid(np.arange(width, dtype=np.float32), np.arange(height, dtype=np.float32))
         edge = np.minimum(self.x[0], width - 1 - self.x[0])
         horizontal = np.clip(edge / max(1, width * .05), 0, 1)
@@ -114,12 +115,34 @@ class Stereo:
         self.last, self.last_luma = shift, luma
         gradient = np.abs(cv.Sobel(shift, cv.CV_32F, 1, 0, ksize=3)) * .25
         guarded = shift * (1 - .8 * np.clip(gradient / .18, 0, 1))
-        offset = cv.resize(guarded, (self.width, self.height)) * self.scale
+        self.full_map = cv.resize(guarded, (self.width, self.height))
+        if self.refine:
+            self.full_map = self.refine_edges(self.full_map, guarded, luma, frame)
+        offset = self.full_map * self.scale
         np.add(self.x, offset, out=self.left_x)
         np.subtract(self.x, offset, out=self.right_x)
 
-    def preview(self):
-        return np.rint((self.last + .5) * 255).astype(np.uint8)
+    def refine_edges(self, base, depth, luma, frame):
+        cv = self.cv
+        guide = luma.astype(np.float32) / 255
+        mean_guide = cv.blur(guide, (5, 5))
+        mean_depth = cv.blur(depth, (5, 5))
+        variance = cv.blur(guide * guide, (5, 5)) - mean_guide * mean_guide
+        covariance = cv.blur(guide * depth, (5, 5)) - mean_guide * mean_depth
+        slope = covariance / (np.maximum(variance, 0) + .004)
+        intercept = mean_depth - slope * mean_guide
+
+        size = (self.width, self.height)
+        full_guide = cv.cvtColor(frame, cv.COLOR_RGB2GRAY).astype(np.float32) / 255
+        guided = cv.resize(cv.blur(slope, (5, 5)), size) * full_guide
+        guided += cv.resize(cv.blur(intercept, (5, 5)), size)
+        # Only correct locally. This limits copying texture and subtitles into depth.
+        base += np.clip(guided - base, -.08, .08)
+        return np.clip(base, -.5, .5, out=base)
+
+    def preview(self, full=False):
+        depth = self.full_map if full else self.last
+        return np.rint((depth + .5) * 255).astype(np.uint8)
 
     def render(self, frame):
         half = self.sbs.shape[1] // 2
