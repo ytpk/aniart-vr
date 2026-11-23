@@ -81,9 +81,10 @@ uniform float depthBlend;
 uniform mat4 transform;
 uniform vec4 crop;
 uniform vec2 inset;
-uniform int operation, post, stereoView, layer;
+uniform int operation, post, stereoView, layer, coveringLayer;
 uniform vec2 sourceTexel;
 uniform float shift, depthBand;
+uniform vec3 layerProjection;
 in vec2 uv;
 out vec4 color;
 vec3 source(vec2 p) {
@@ -133,14 +134,24 @@ vec3 finishPicture(vec2 p, bool sharpened) {
     }
     return value;
 }
-float layerAlpha() {
-    vec2 coord = clamp(vec2(uv.x, uv.y * depthBand), inset,
+float layerAlpha(vec2 p, int plane) {
+    vec2 coord = clamp(vec2(p.x, p.y * depthBand), inset,
                        vec2(1.0, depthBand) - inset);
     float depth = light(texture(frame, (transform * vec4(coord, 0.0, 1.0)).xy).rgb);
-    float mask = layer == 1 ? smoothstep(.43, .58, depth) : smoothstep(.61, .76, depth);
-    float edge = min(min(uv.x, 1.0-uv.x), min(uv.y, 1.0-uv.y));
+    float mask = plane == 1 ? smoothstep(.43, .58, depth) : smoothstep(.61, .76, depth);
+    float edge = min(min(p.x, 1.0-p.x), min(p.y, 1.0-p.y));
     // Leave the frame and subtitles on the background plane.
-    return mask * smoothstep(.006, .043, edge) * smoothstep(.055, .23, uv.y);
+    return mask * smoothstep(.006, .043, edge) * smoothstep(.055, .23, p.y);
+}
+vec3 fillRevealedEdge(vec2 p, vec3 rgb, bool sharpened) {
+    if (coveringLayer == 0) return rgb;
+    vec2 nearer = p * layerProjection.x + layerProjection.yz;
+    vec2 displacement = nearer - p;
+    if (all(lessThan(abs(displacement), sourceTexel * .35))) return rgb;
+    float revealed = layerAlpha(p, coveringLayer) - layerAlpha(nearer, coveringLayer);
+    if (revealed < .05) return rgb;
+    // Sample just beyond the edge that moved away from this pixel.
+    return mix(rgb, picture(p + 2.0 * displacement, sharpened), smoothstep(.05, .65, revealed));
 }
 void main() {
     if (operation == 5) {
@@ -189,9 +200,9 @@ void main() {
         color = vec4(.87, .81, 1, 1);
     } else {
         bool sharpened = operation == 1 || (operation == 2 && uv.x > .5);
-        float alpha = layer == 0 ? 1.0 : layerAlpha();
+        float alpha = layer == 0 ? 1.0 : layerAlpha(p, layer);
         if (alpha < .003) discard;
-        color = vec4(finishPicture(p, sharpened), alpha);
+        color = vec4(fillRevealedEdge(p, finishPicture(p, sharpened), sharpened), alpha);
     }
 }
 )glsl";
@@ -244,6 +255,7 @@ void main() {
         return mode == 1 || mode == 2 ? mode : 0;
     }
     static constexpr int depthBandHeight = 192;
+    static constexpr float layerStepMeters = .075f;
     bool Layered() const { return ((config >> 5) & 7) == 4 && sourceH > depthBandHeight; }
     jfloatArray transformArray = nullptr;
     jmethodID latch = nullptr, upload = nullptr, close = nullptr, readConfig = nullptr, click = nullptr;
@@ -318,6 +330,7 @@ void main() {
         glUniform1i(glGetUniformLocation(video, "post"), post);
         glUniform1i(glGetUniformLocation(video, "stereoView"), stereoView);
         glUniform1i(glGetUniformLocation(video, "layer"), layer);
+        glUniform1i(glGetUniformLocation(video, "coveringLayer"), 0);
         glUniform1f(glGetUniformLocation(video, "depthBand"), band);
         glUniform2f(glGetUniformLocation(video, "sourceTexel"),
                     (layout == 1 ? 2.f : 1.f) / sourceW, 1.0f / (cropH * sourceH));
@@ -331,6 +344,18 @@ void main() {
         glBindTexture(GL_TEXTURE_2D, operation == 1 || operation == 2 ? textures[5 + view] : 0);
         glActiveTexture(GL_TEXTURE0);
         glBindTexture(GL_TEXTURE_EXTERNAL_OES, oes);
+    }
+
+    void CoverWithLayer(const XrVector3f& viewer, const XrVector3f& screen, float w, float h,
+                        float fromOffset, float toOffset, int layer) {
+        const float fromScale = 1.0f + fromOffset / screen.z;
+        const float toScale = 1.0f + toOffset / screen.z;
+        const float towardEye = (toOffset - fromOffset) / std::max(.1f, viewer.z - screen.z - fromOffset);
+        const float scale = (1.0f - towardEye) * fromScale / toScale;
+        const float dx = (screen.x / w - .5f) * (scale - 1.0f) + towardEye * viewer.x / (w * toScale);
+        const float dy = (screen.y / h - .5f) * (scale - 1.0f) + towardEye * viewer.y / (h * toScale);
+        glUniform1i(glGetUniformLocation(video, "coveringLayer"), layer);
+        glUniform3f(glGetUniformLocation(video, "layerProjection"), scale, dx, dy);
     }
 
     void Process(bool enhance, bool mapDepth, bool captureDepth, bool updateLight) {
@@ -811,11 +836,12 @@ public:
             const float scale = depthModel == 0 ? .00125f : .003f * depthStrength;
             const float shift = depthReady ? (view ? 1 : -1) * ((config >> 9) & 15) * scale : 0;
             const int stereoView = depthReady ? (config >> 28) & 3 : 0;
+            const float step = Layered() ? layerStepMeters * std::min(6, (config >> 9) & 15) : 0.0f;
             UseVideo(QuadMatrix(vp, screen, actualWidth, h, front), layout, layout ? view : 0,
                      operation, shift, (config >> 18) & 3, stereoView);
+            if (step > 0.0f) CoverWithLayer(eyePosition, screen, actualWidth, h, 0, step, 1);
             glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
-            const float step = .035f * std::min(6, (config >> 9) & 15);
-            if (Layered() && step > 0.0f) {
+            if (step > 0.0f) {
                 glEnable(GL_BLEND);
                 glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
                 glDepthMask(GL_FALSE);
@@ -826,6 +852,7 @@ public:
                     const XrVector3f plane{x * scale, y * scale, screen.z + offset};
                     UseVideo(QuadMatrix(vp, plane, actualWidth * scale, h * scale, front),
                              0, 0, 0, 0, (config >> 18) & 3, 0, layer);
+                    if (layer == 1) CoverWithLayer(eyePosition, screen, actualWidth, h, step, 2 * step, 2);
                     glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
                 }
                 glDepthMask(GL_TRUE);

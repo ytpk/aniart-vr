@@ -54,6 +54,26 @@ def probe_duration(source):
         return 0
 
 
+def playback_options(defaults, body):
+    options = argparse.Namespace(**vars(defaults))
+    if "height" in body:
+        height = body["height"]
+        if type(height) is not int or height not in (720, 1080):
+            raise ValueError("Unsupported output resolution")
+        options.width, options.height = height * 16 // 9, height
+    for name in ("anime4k", "depth_refine"):
+        if name in body:
+            if type(body[name]) is not bool:
+                raise ValueError(f"Invalid {name}")
+            setattr(options, name, body[name])
+    if "depth_every" in body:
+        interval = body["depth_every"]
+        if type(interval) is not int or not 1 <= interval <= 12:
+            raise ValueError("Invalid depth interval")
+        options.depth_every = interval
+    return options
+
+
 def commands(args, source, mode="sbs"):
     decoder = ["ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error", "-filter_threads", "2"]
     if args.anime4k and args.vulkan_device is not None:
@@ -97,6 +117,7 @@ def commands(args, source, mode="sbs"):
 class Job:
     source: list[str]
     mode: str
+    options: argparse.Namespace
     duration_ms: int
     expires_at: float
 
@@ -141,6 +162,7 @@ class Handler(BaseHTTPRequestHandler):
             seekable = body.get("seekable", False)
             if mode not in ("sbs", "layers") or type(seekable) is not bool:
                 raise ValueError()
+            options = playback_options(self.server.args, body)
         except (ValueError, KeyError, TypeError, AttributeError):
             self.send_error(400, "Invalid stream request")
             return
@@ -156,9 +178,11 @@ class Handler(BaseHTTPRequestHandler):
                     self.send_error(429)
                     return
                 del jobs[min(jobs, key=lambda job_id: jobs[job_id].expires_at)]
-            jobs[key] = Job(source, mode, duration_ms, now + 120)
+            jobs[key] = Job(source, mode, options, duration_ms, now + 120)
         response = json.dumps({"path": f"/v1/streams/{key}.ts", "stereo": mode,
-                               "duration_ms": duration_ms}).encode()
+                               "duration_ms": duration_ms, "height": options.height,
+                               "anime4k": options.anime4k, "depth_every": options.depth_every,
+                               "depth_refine": options.depth_refine}).encode()
         self.send_response(201)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(response)))
@@ -198,7 +222,7 @@ class Handler(BaseHTTPRequestHandler):
             self.server.viewer.release()
 
     def stream(self, job, start_ms):
-        args = self.server.args
+        args = job.options
         source = job.source
         if start_ms:
             source = [*source[:-2], "-ss", f"{start_ms / 1000:.3f}", *source[-2:]]
@@ -328,6 +352,9 @@ class Handler(BaseHTTPRequestHandler):
             if not chunk:
                 self.send_error(502, "No output from FFmpeg; check video, Vulkan and VAAPI")
                 return
+            logging.info("PC %s | picture %dx%d | Anime4K %s | depth every %d | refine %s",
+                         job.mode, args.width, args.height, "on" if args.anime4k else "off",
+                         args.depth_every, "on" if args.depth_refine else "off")
             logging.info("First output in %.2f s", time.monotonic() - started)
             self.send_response(200)
             self.send_header("Content-Type", "video/mp2t")

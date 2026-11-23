@@ -39,6 +39,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.UnaryOperator;
 
 public final class CinemaActivity extends NativeActivity {
     private static final int IMPORT_CATALOG = 42;
@@ -55,6 +56,8 @@ public final class CinemaActivity extends NativeActivity {
     private OnlineEpisode loadingNext;
     private final ExecutorService onlinePlayback = Executors.newSingleThreadExecutor();
     private volatile PcProcessing pcProcessing;
+    private volatile boolean usePc;
+    private volatile PcProcessing.Video pcVideo;
     private volatile boolean playingFromPc;
     private volatile boolean pcLayers;
     private volatile PcProcessing.Stream pcStream;
@@ -104,6 +107,11 @@ public final class CinemaActivity extends NativeActivity {
             try { pcProcessing = PcProcessing.parse(pc); }
             catch (IllegalArgumentException ignored) { }
         }
+        usePc = preferences.getBoolean("pc_processing_enabled", pcProcessing != null);
+        pcVideo = new PcProcessing.Video(preferences.getInt("pc_height", 0),
+                preferences.contains("pc_anime4k") ? preferences.getBoolean("pc_anime4k", true) : null,
+                preferences.getInt("pc_depth_every", 0),
+                preferences.contains("pc_refine") ? preferences.getBoolean("pc_refine", true) : null);
         autoNext = preferences.getBoolean("auto_next", true);
         pcLayers = preferences.getBoolean("pc_layers", true);
         roomSound = preferences.getBoolean("room_sound", false);
@@ -481,7 +489,7 @@ public final class CinemaActivity extends NativeActivity {
     }
 
     private void startPlayer(Catalog.Episode episode, long position, boolean autoPlay) {
-        startPlayer(episode, position, autoPlay, pcProcessing);
+        startPlayer(episode, position, autoPlay, pcEnabled() ? pcProcessing : null);
     }
 
     private void startPlayer(Catalog.Episode episode, long position, boolean autoPlay, PcProcessing pc) {
@@ -495,15 +503,23 @@ public final class CinemaActivity extends NativeActivity {
         playing = episode;
         playingFromPc = true;
         boolean layers = pcLayers;
+        PcProcessing.Video video = pcVideo;
         status = "Подготовка потока на ПК";
         publish();
         int request = generation.get();
         pcRequests.execute(() -> {
             try {
-                PcProcessing.Stream stream = pc.prepare(episode, layers);
+                PcProcessing.Stream stream = pc.prepare(episode, layers, video);
                 ui.post(() -> {
                     if (request == generation.get() && surface != null && !isDestroyed()) {
+                        if (layers != pcLayers || !video.equals(pcVideo)) {
+                            startPlayer(episode, position, autoPlay, pc);
+                            return;
+                        }
                         if (layers && !stream.layers()) notice = "Обновите сервер ПК для параллакса";
+                        else if (stream.video().anime4k() == null && video.anime4k() != null) {
+                            notice = "Обновите сервер для настроек обработки";
+                        }
                         openPcPlayer(episode, position, autoPlay, pc, stream);
                     }
                 });
@@ -620,37 +636,72 @@ public final class CinemaActivity extends NativeActivity {
                 seekable(), volume, speed);
     }
 
-    boolean pcEnabled() { return pcProcessing != null; }
+    boolean pcEnabled() { return usePc && pcProcessing != null; }
+    PcProcessing pcConnection() { return pcProcessing; }
     boolean playingFromPc() { return playingFromPc; }
     boolean playingPcLayers() { return pcStream != null && pcStream.layers(); }
     boolean pcLayersEnabled() { return pcLayers; }
+    PcProcessing.Video pcVideo() { return pcVideo; }
+    PcProcessing.Video effectivePcVideo() {
+        PcProcessing.Stream stream = pcStream;
+        return stream == null ? null : stream.video();
+    }
 
     void setPcLayers(boolean layers) {
         ui.post(() -> {
             if (pcLayers == layers) return;
             pcLayers = layers;
             preferences.edit().putBoolean("pc_layers", pcLayers).apply();
-            if (activePc != null && player != null && playing != null) {
-                startPlayer(playing, playbackPosition(), playRequested, activePc);
-            }
+            restartPc();
         });
     }
 
-    void togglePcProcessing() {
+    void updatePcVideo(UnaryOperator<PcProcessing.Video> update) {
         ui.post(() -> {
-            if (pcProcessing != null) {
-                pcProcessing = null;
-                preferences.edit().remove("pc_processing").apply();
-                notice = "Следующая серия откроется на Quest";
-                return;
-            }
+            PcProcessing.Video video = update.apply(pcVideo);
+            if (video.equals(pcVideo)) return;
+            pcVideo = video;
+            var edit = preferences.edit().putInt("pc_height", video.height()).putInt("pc_depth_every", video.depthEvery());
+            if (video.anime4k() != null) edit.putBoolean("pc_anime4k", video.anime4k());
+            if (video.refine() != null) edit.putBoolean("pc_refine", video.refine());
+            edit.apply();
+            restartPc();
+        });
+    }
+
+    private void restartPc() {
+        if (activePc != null && player != null && playing != null) {
+            startPlayer(playing, playbackPosition(), playRequested, activePc);
+        }
+    }
+
+    void connectPc(PcProcessing connection) {
+        ui.post(() -> savePcConnection(connection));
+    }
+
+    private void savePcConnection(PcProcessing connection) {
+        pcProcessing = connection;
+        usePc = true;
+        preferences.edit().putString("pc_processing", connection.origin() + "#" + connection.token())
+                .putBoolean("pc_processing_enabled", true).apply();
+        notice = "Следующая серия откроется через ПК";
+    }
+
+    void disablePcProcessing() {
+        ui.post(() -> {
+            usePc = false;
+            preferences.edit().putBoolean("pc_processing_enabled", false).apply();
+            notice = "Следующая серия откроется на Quest";
+        });
+    }
+
+    void pastePcConnection() {
+        ui.post(() -> {
             try {
                 ClipboardManager clipboard = getSystemService(ClipboardManager.class);
                 var clip = clipboard == null ? null : clipboard.getPrimaryClip();
                 String value = clip == null ? "" : clip.getItemAt(0).coerceToText(this).toString().trim();
-                pcProcessing = PcProcessing.parse(value);
-                preferences.edit().putString("pc_processing", value).apply();
-                notice = "Следующая серия откроется через ПК";
+                savePcConnection(PcProcessing.parse(value));
             } catch (RuntimeException error) {
                 notice = "Скопируйте http://IP:8765#ТОКЕН";
             }

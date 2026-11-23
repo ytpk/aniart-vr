@@ -17,6 +17,7 @@ import android.text.TextUtils;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
+import java.util.function.Consumer;
 
 final class CinemaPanel {
     private static final int WIDTH = 1280;
@@ -28,7 +29,7 @@ final class CinemaPanel {
     private static final int INK = 0xfff0effc;
     private static final int MUTED = 0xffafb8cf;
     private static final int ACCENT = 0xffc2afff;
-    private static final int HIDDEN = 0, LIBRARY = 1, WATCH = 2, SETTINGS = 3;
+    private static final int HIDDEN = 0, LIBRARY = 1, WATCH = 2, SETTINGS = 3, PC_SETUP = 4;
     private static final int PAGE_SIZE = 8;
     private static final int DETAIL_SIZE = 5;
 
@@ -53,6 +54,8 @@ final class CinemaPanel {
     private int page = LIBRARY, libraryPage, sectionsPage, variantsPage;
     private boolean favoritesOnly, keyboard, cyrillic = true;
     private String search = "";
+    private String pcAddress = "", pcToken = "", pcError = "";
+    private boolean pcTokenFocused, pcUppercase;
     private int stereo, depth, screenSize;
     private int layerDepth;
     private int depthModel, stereoView;
@@ -179,6 +182,8 @@ final class CinemaPanel {
         if (keyboard) {
             keyboard = false;
             dirty = true;
+        } else if (page == PC_SETUP) {
+            show(SETTINGS);
         } else if (page == SETTINGS) {
             show(WATCH);
         } else if (remote && page == LIBRARY && anicli.back()) {
@@ -266,7 +271,7 @@ final class CinemaPanel {
         if (!notice.equals(lastNotice) || this.filterStatus != filterStatus || frameWidth != width
                 || frameHeight != height || this.depthReady != depthReady) dirty = true;
         if (page == WATCH && (!state.equals(lastSnapshot) || now - lastRender >= 2000)) dirty = true;
-        if (page == SETTINGS && now - lastRender >= 700) dirty = true;
+        if ((page == SETTINGS || page == PC_SETUP) && now - lastRender >= 700) dirty = true;
         if (!dirty) return false;
 
         lastNotice = notice;
@@ -293,6 +298,7 @@ final class CinemaPanel {
         else {
             header(state);
             if (page == SETTINGS) settings(notice);
+            else if (page == PC_SETUP) pcSetup(notice);
             else if (keyboard) keyboard();
             else if (remote) remoteCatalog(notice);
             else if (details != null) detail();
@@ -310,7 +316,7 @@ final class CinemaPanel {
         button("ani-cli", 32, 22, 176, 53, page == LIBRARY && remote, () -> switchCatalog(true));
         button("Локальное", 224, 22, 202, 53, page == LIBRARY && !remote, () -> switchCatalog(false));
         if (state.episode() != null) button("Плеер", 551, 22, 190, 53, false, () -> show(WATCH));
-        button("Настройки", 757, 22, 215, 53, page == SETTINGS, () -> show(SETTINGS));
+        button("Настройки", 757, 22, 215, 53, page == SETTINGS || page == PC_SETUP, () -> show(SETTINGS));
         if (state.episode() != null) button("Скрыть", 1035, 22, 213, 53, false, () -> show(HIDDEN));
     }
 
@@ -514,16 +520,7 @@ final class CinemaPanel {
         String[] rows = cyrillic
                 ? new String[]{"ЙЦУКЕНГШЩЗХЪ", "ФЫВАПРОЛДЖЭ", "ЯЧСМИТЬБЮЁ"}
                 : new String[]{"QWERTYUIOP", "ASDFGHJKL", "ZXCVBNM"};
-        for (int r = 0; r < rows.length; r++) {
-            String row = rows[r];
-            float keyWidth = 88;
-            float x = (WIDTH - row.length() * (keyWidth + 10) + 10) / 2;
-            for (int k = 0; k < row.length(); k++) {
-                String letter = row.substring(k, k + 1);
-                button(letter, x + k * (keyWidth + 10), 274 + r * 83, keyWidth, 69, false,
-                        () -> append(letter.toLowerCase(Locale.ROOT)));
-            }
-        }
+        keyboardRows(rows, 274, 83, 69, letter -> append(letter.toLowerCase(Locale.ROOT)));
         for (int i = 0; i < 10; ++i) {
             String key = Integer.toString(i);
             button(key, 150 + i * 98, 523, 88, 56, false, () -> append(key));
@@ -542,6 +539,107 @@ final class CinemaPanel {
             keyboard = false;
             if (remote) anicli.search(search);
         });
+    }
+
+    private void keyboardRows(String[] rows, int y, int spacing, int height, Consumer<String> append) {
+        for (int r = 0; r < rows.length; r++) {
+            String row = rows[r];
+            float x = (WIDTH - row.length() * 98 + 10) / 2f;
+            for (int key = 0; key < row.length(); key++) {
+                String letter = row.substring(key, key + 1);
+                button(letter, x + key * 98, y + r * spacing, 88, height, false, () -> append.accept(letter));
+            }
+        }
+    }
+
+    private void openPcSetup() {
+        var connection = activity.pcConnection();
+        pcAddress = connection == null ? "" : connection.origin().getRawAuthority();
+        pcToken = connection == null ? "" : connection.token();
+        pcTokenFocused = pcUppercase = false;
+        pcError = "";
+        show(PC_SETUP);
+    }
+
+    private void pcSetup(String notice) {
+        text("Подключение к ПК", 32, 144, 34, INK, 680, true);
+        button("Из буфера", 1000, 108, 248, 50, false, () -> {
+            activity.pastePcConnection();
+            show(SETTINGS);
+        });
+        text("Адрес сервера", 32, 178, 20, MUTED, 706, false);
+        text("Токен", 755, 178, 20, MUTED, 493, false);
+        button(pcAddress.isEmpty() ? "192.168.1.10:8765" : pcAddress, 32, 189, 706, 56,
+                !pcTokenFocused, () -> pcTokenFocused = false);
+        button(pcToken.isEmpty() ? "Введите токен" : "•".repeat(Math.min(pcToken.length(), 28)), 755, 189, 493, 56,
+                pcTokenFocused, () -> pcTokenFocused = true);
+        String[] rows = {"1234567890.:", "qwertyuiop-/", "asdfghjkl_[]", "zxcvbnm"};
+        for (int i = 0; pcUppercase && i < rows.length; i++) rows[i] = rows[i].toUpperCase(Locale.ROOT);
+        keyboardRows(rows, 257, 59, 52, this::appendPc);
+        button(pcUppercase ? "abc" : "ABC", 32, 500, 110, 56, pcUppercase, () -> pcUppercase = !pcUppercase);
+        button("⌫", 156, 500, 110, 56, false, () -> {
+            String value = pcTokenFocused ? pcToken : pcAddress;
+            if (!value.isEmpty()) setPcField(value.substring(0, value.length() - 1));
+        });
+        button("Очистить", 280, 500, 180, 56, false, () -> setPcField(""));
+        if (activity.pcEnabled()) {
+            button("Отключить ПК", 660, 500, 280, 56, false, () -> {
+                activity.disablePcProcessing();
+                show(SETTINGS);
+            });
+        }
+        button("Подключить", 954, 500, 294, 56, true, () -> {
+            try {
+                activity.connectPc(PcProcessing.manual(pcAddress, pcToken));
+                show(SETTINGS);
+            } catch (IllegalArgumentException invalid) {
+                pcError = invalid.getMessage();
+            }
+        });
+        text(pcError.isEmpty() ? notice : pcError, 32, 588, 19, ACCENT, 1216, false);
+        pcVideoButtons(624);
+    }
+
+    private void appendPc(String letter) {
+        String value = pcTokenFocused ? pcToken : pcAddress;
+        if (value.length() < 128) setPcField(value + letter);
+    }
+
+    private void setPcField(String value) {
+        if (pcTokenFocused) pcToken = value;
+        else pcAddress = value;
+        pcError = "";
+    }
+
+    private void pcVideoButtons(int y) {
+        var selected = activity.pcVideo();
+        var effective = activity.effectivePcVideo();
+        boolean filter = option(selected.anime4k(), effective == null ? null : effective.anime4k(), true);
+        boolean refine = option(selected.refine(), effective == null ? null : effective.refine(), false);
+        int interval = selected.depthEvery();
+        String depth = interval == 0 ? "Карты: с ПК" : interval == 1 ? "Карты: каждый кадр" : "Карты: 1 из " + interval;
+        button(filter ? "Anime4K: вкл." : "Anime4K: выкл.", 32, y, 274, 59, filter,
+                () -> activity.updatePcVideo(video -> video.withAnime4k(!filter)));
+        pcResolutionButton(320, y, 59);
+        button(depth, 584, y, 320, 59, interval != 0, () -> activity.updatePcVideo(video ->
+                video.withDepthEvery((video.depthEvery() + 1) % 4)));
+        button(refine ? "Контуры: вкл." : "Контуры: выкл.", 918, y, 330, 59, refine,
+                () -> activity.updatePcVideo(video -> video.withRefine(!refine)));
+    }
+
+    private static boolean option(Boolean selected, Boolean effective, boolean fallback) {
+        if (selected != null) return selected;
+        return effective == null ? fallback : effective;
+    }
+
+    private void pcResolutionButton(int x, int y, int h) {
+        int output = activity.pcVideo().height();
+        button(output == 0 ? "Выход: с ПК" : output + "p", x, y, 250, h, output != 0,
+                () -> activity.updatePcVideo(video -> video.withHeight(switch (video.height()) {
+                    case 0 -> 720;
+                    case 720 -> 1080;
+                    default -> 0;
+                })));
     }
 
     private void append(String value) {
@@ -599,13 +697,22 @@ final class CinemaPanel {
     }
 
     private void settings(String notice) {
+        boolean pcPlayback = activity.playingFromPc();
         text("Изображение", 32, 152, 36, INK, 600, true);
-        button(fast ? "Anime4K: вкл." : "Anime4K: выкл.", 32, 173, 274, 62, fast, () -> {
-            fast = !fast;
-            if (!fast) comparison = false;
-            settingsChanged();
-        });
-        button(comparison ? "A/B: вкл." : "A/B: выкл.", 320, 173, 250, 62, comparison, this::toggleComparison);
+        if (pcPlayback) {
+            var effective = activity.effectivePcVideo();
+            boolean filter = option(activity.pcVideo().anime4k(), effective == null ? null : effective.anime4k(), true);
+            button(filter ? "Anime4K · ПК: вкл." : "Anime4K · ПК: выкл.", 32, 173, 274, 62, filter,
+                    () -> activity.updatePcVideo(video -> video.withAnime4k(!filter)));
+            pcResolutionButton(320, 173, 62);
+        } else {
+            button(fast ? "Anime4K: вкл." : "Anime4K: выкл.", 32, 173, 274, 62, fast, () -> {
+                fast = !fast;
+                if (!fast) comparison = false;
+                settingsChanged();
+            });
+            button(comparison ? "A/B: вкл." : "A/B: выкл.", 320, 173, 250, 62, comparison, this::toggleComparison);
+        }
         button(antialias ? "Сглаживание: вкл." : "Сглаживание: выкл.", 584, 173, 320, 62, antialias, () -> {
             antialias = !antialias;
             settingsChanged();
@@ -626,14 +733,13 @@ final class CinemaPanel {
             dehalo = !dehalo;
             settingsChanged();
         });
-        boolean pcPlayback = activity.playingFromPc();
         if (pcPlayback) {
             boolean layers = activity.pcLayersEnabled();
             button("Параллакс", 32, 308, 290, 62, layers, () -> activity.setPcLayers(true));
             button("SBS · рядом", 338, 308, 290, 62, !layers, () -> activity.setPcLayers(false));
             if (layers) {
                 button("−", 32, 385, 74, 58, false, () -> changeLayerDepth(-1));
-                text("Отступ " + layerDepth + "/6", 126, 422, 24, MUTED, 182, true);
+                text("Ближний " + (layerDepth * 15) + " см", 126, 422, 23, MUTED, 182, true);
                 button("+", 316, 385, 74, 58, false, () -> changeLayerDepth(1));
             }
         } else {
@@ -694,7 +800,7 @@ final class CinemaPanel {
         });
         button("Импорт каталога", 808, 521, 220, 60, false, activity::pickCatalog);
         boolean pc = activity.pcEnabled();
-        button(pc ? "ПК: вкл." : "ПК: выкл.", 1040, 521, 208, 60, pc, activity::togglePcProcessing);
+        button(pc ? "Сервер ПК · вкл." : "Сервер ПК", 1040, 521, 208, 60, pc, this::openPcSetup);
         button(roomSound ? "Звук зала: вкл." : "Звук зала: выкл.", 32, 599, 268, 55, roomSound, () -> {
             roomSound = !roomSound;
             activity.setRoomSound(roomSound);
@@ -738,7 +844,11 @@ final class CinemaPanel {
     }
 
     private String filterLabel() {
-        if (activity.playingFromPc()) return "Обработка на ПК";
+        if (activity.playingFromPc()) {
+            var effective = activity.effectivePcVideo();
+            if (effective == null || effective.anime4k() == null) return "Обработка на ПК";
+            return effective.anime4k() ? "Anime4K · ПК" : "Anime4K выкл. · ПК";
+        }
         return switch (filterStatus) {
             case 1 -> comparison ? "Слева оригинал / справа Anime4K" : "Anime4K ×2";
             case 2 -> "Anime4K: ожидание кадра";
