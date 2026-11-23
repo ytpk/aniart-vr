@@ -33,6 +33,7 @@ import java.io.File;
 import java.io.FileOutputStream;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.Callable;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -53,6 +54,9 @@ public final class CinemaActivity extends NativeActivity {
     private volatile OnlineEpisode onlineEpisode;
     private OnlineEpisode loadingNext;
     private final ExecutorService onlinePlayback = Executors.newSingleThreadExecutor();
+    private volatile PcProcessing pcProcessing;
+    private volatile boolean playingFromPc;
+    private final ExecutorService pcRequests = Executors.newSingleThreadExecutor();
     private volatile String notice = "";
     private volatile Snapshot snapshot = new Snapshot(null, "Выберите видео", 0, 0, false, false, 1f, 1f);
     private volatile long format;
@@ -91,6 +95,11 @@ public final class CinemaActivity extends NativeActivity {
     @Override public void onCreate(Bundle state) {
         depthModels = new DepthModels(getApplicationContext());
         preferences = getSharedPreferences("cinema", MODE_PRIVATE);
+        String pc = preferences.getString("pc_processing", "");
+        if (!pc.isEmpty()) {
+            try { pcProcessing = PcProcessing.parse(pc); }
+            catch (IllegalArgumentException ignored) { }
+        }
         autoNext = preferences.getBoolean("auto_next", true);
         roomSound = preferences.getBoolean("room_sound", false);
         volume = preferences.getFloat("volume", 1f);
@@ -187,6 +196,7 @@ public final class CinemaActivity extends NativeActivity {
     @Override protected void onDestroy() {
         super.onDestroy();
         panel.shutdown();
+        pcRequests.shutdownNow();
         depthModels.shutdown();
         onlineEpisode = null;
         onlinePlayback.shutdownNow();
@@ -406,11 +416,16 @@ public final class CinemaActivity extends NativeActivity {
         roomInputChannels = 0;
         playing = null;
         playingShared = false;
+        playingFromPc = false;
         playRequested = false;
     }
 
     private void togglePlayback() {
-        if (player == null || playing == null) return;
+        if (playing == null) return;
+        if (player == null) {
+            if (!status.equals("Подготовка потока на ПК")) play(playing, false);
+            return;
+        }
         if (player.getPlayerError() != null || player.getPlaybackState() == Player.STATE_ENDED) {
             play(playing, false);
             return;
@@ -435,7 +450,41 @@ public final class CinemaActivity extends NativeActivity {
     private void startPlayer(Catalog.Episode episode, long position, boolean autoPlay) {
         if (surface == null) return;
         releasePlayer();
-        var http = new DefaultHttpDataSource.Factory().setDefaultRequestProperties(episode.headers());
+        PcProcessing pc = pcProcessing;
+        String scheme = episode.url().getScheme();
+        if (pc == null || episode.stereo() != 0 || !("https".equals(scheme) || "http".equals(scheme))) {
+            openPlayer(episode, position, autoPlay, episode.url().toString(), episode.mimeType(), episode.headers(), false);
+            return;
+        }
+        playing = episode;
+        playingFromPc = true;
+        status = "Подготовка потока на ПК";
+        publish();
+        int request = generation.get();
+        pcRequests.execute(() -> {
+            try {
+                String stream = pc.prepare(episode);
+                ui.post(() -> {
+                    if (request == generation.get() && surface != null && !isDestroyed()) {
+                        openPlayer(episode, C.TIME_UNSET, autoPlay, stream, "video/mp2t", pc.headers(), true);
+                    }
+                });
+            } catch (Exception error) {
+                ui.post(() -> {
+                    if (request != generation.get() || isDestroyed()) return;
+                    status = "ПК: " + (error instanceof java.io.IOException && error.getMessage() != null
+                            && error.getMessage().matches("HTTP [0-9]+") ? error.getMessage() : "сервер недоступен");
+                    publish();
+                });
+            }
+        });
+    }
+
+    private void openPlayer(Catalog.Episode episode, long position, boolean autoPlay, String url, String mime,
+                            Map<String, String> headers, boolean fromPc) {
+        var http = new DefaultHttpDataSource.Factory().setDefaultRequestProperties(headers);
+        if (fromPc) http.setReadTimeoutMs(60000);
+        playingFromPc = fromPc;
         var data = new DefaultDataSource.Factory(this, http);
         ExoPlayer.Builder builder = roomSound ? new ExoPlayer.Builder(this, roomRenderers()) : new ExoPlayer.Builder(this);
         ExoPlayer active = builder.setMediaSourceFactory(new DefaultMediaSourceFactory(data)).build();
@@ -497,7 +546,7 @@ public final class CinemaActivity extends NativeActivity {
                 Log.i("AniartVR", "Video decoder " + name);
             }
         });
-        MediaItem item = new MediaItem.Builder().setUri(episode.url()).setMimeType(episode.mimeType()).build();
+        MediaItem item = new MediaItem.Builder().setUri(url).setMimeType(mime).build();
         active.setMediaItem(item, position > 0 ? position : C.TIME_UNSET);
         active.prepare();
         active.setPlayWhenReady(foreground && autoPlay);
@@ -524,6 +573,30 @@ public final class CinemaActivity extends NativeActivity {
                 player != null && playRequested && player.getPlaybackState() != Player.STATE_ENDED
                         && player.getPlayerError() == null,
                 player != null && player.isCurrentMediaItemSeekable(), volume, speed);
+    }
+
+    boolean pcEnabled() { return pcProcessing != null; }
+    boolean playingFromPc() { return playingFromPc; }
+
+    void togglePcProcessing() {
+        ui.post(() -> {
+            if (pcProcessing != null) {
+                pcProcessing = null;
+                preferences.edit().remove("pc_processing").apply();
+                notice = "Следующая серия откроется на Quest";
+                return;
+            }
+            try {
+                ClipboardManager clipboard = getSystemService(ClipboardManager.class);
+                var clip = clipboard == null ? null : clipboard.getPrimaryClip();
+                String value = clip == null ? "" : clip.getItemAt(0).coerceToText(this).toString().trim();
+                pcProcessing = PcProcessing.parse(value);
+                preferences.edit().putString("pc_processing", value).apply();
+                notice = "Следующая серия откроется через ПК";
+            } catch (RuntimeException error) {
+                notice = "Скопируйте http://IP:8765#ТОКЕН";
+            }
+        });
     }
 
     void pickCatalog() {

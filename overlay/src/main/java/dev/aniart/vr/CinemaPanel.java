@@ -129,7 +129,9 @@ final class CinemaPanel {
                 && SystemClock.uptimeMillis() - lastUse > 11000) {
             show(HIDDEN);
         }
-        return page | (fast ? 8 : 0) | (comparison ? 16 : 0) | (stereo << 5)
+        boolean pcStream = activity.playingFromPc();
+        return page | (fast && !pcStream ? 8 : 0) | (comparison && !pcStream ? 16 : 0)
+                | ((pcStream ? 1 : stereo) << 5)
                 | (reverse ? 256 : 0) | (depth << 9) | (screenSize << 13) | (roomSound ? 1 << 15 : 0)
                 | (depthModel << 24) | (stereoView << 28) | (antialias ? 1 << 18 : 0) | (deband ? 1 << 19 : 0)
                 | (darkRoom ? 1 << 20 : 0) | (prefer90 ? 1 << 21 : 0) | (smoothLaser ? 1 << 22 : 0) | (dehalo ? 1 << 23 : 0);
@@ -667,7 +669,9 @@ final class CinemaPanel {
             activity.setAutoNext(autoNext);
             settingsChanged();
         });
-        button("Импорт каталога", 808, 521, 440, 60, false, activity::pickCatalog);
+        button("Импорт каталога", 808, 521, 220, 60, false, activity::pickCatalog);
+        boolean pc = activity.pcEnabled();
+        button(pc ? "ПК: вкл." : "ПК: выкл.", 1040, 521, 208, 60, pc, activity::togglePcProcessing);
         button(roomSound ? "Звук зала: вкл." : "Звук зала: выкл.", 32, 599, 268, 55, roomSound, () -> {
             roomSound = !roomSound;
             activity.setRoomSound(roomSound);
@@ -710,6 +714,7 @@ final class CinemaPanel {
     }
 
     private String filterLabel() {
+        if (activity.playingFromPc()) return "Обработка на ПК";
         return switch (filterStatus) {
             case 1 -> comparison ? "Слева оригинал / справа Anime4K" : "Anime4K ×2";
             case 2 -> "Anime4K: ожидание кадра";
@@ -720,6 +725,7 @@ final class CinemaPanel {
     }
 
     private String stereoStatus() {
+        if (activity.playingFromPc()) return "SBS · ПК";
         if (stereo == 3) {
             if (depth == 0) return "Псевдо-3D: глубина 0";
             String model = DepthModels.label(depthModel);

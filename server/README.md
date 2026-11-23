@@ -1,0 +1,37 @@
+# Aniart VR PC Processing
+
+Домашний сервер для конечных HTTP(S)-источников, включая MP4 и HLS VOD. Quest выбирает серию и передаёт ссылку и её HTTP-заголовки. ПК прогоняет Anime4K CNN x2 S через FFmpeg libplacebo/Vulkan, считает глубину через Limbo V3 на PyTorch/ROCm, синтезирует два глаза и сразу отдаёт H.264/AAC в MPEG-TS. Субтитры в нижней части кадра получают ослабленный стереосдвиг. Выход рассчитан на один Quest.
+
+## Установка на Linux
+
+1. Установите драйвер и PyTorch с ROCm по инструкции AMD для вашей системы и **RX 9060 XT / gfx1200**. Установите также совместимую версию torchvision. `torch.cuda` — имя API PyTorch для GPU, в том числе HIP на AMD. [Матрица AMD](https://rocm.docs.amd.com/projects/radeon-ryzen/en/latest/docs/compatibility/compatibilityrad/native_linux/native_linux_compatibility.html)
+2. Нужен FFmpeg с фильтром `libplacebo` и драйвер Vulkan. Для аппаратного кодирования нужен `h264_vaapi` и устройство Mesa VAAPI. Проверьте `ffmpeg -filters`, `ffmpeg -encoders`, `vulkaninfo --summary` и `vainfo --display drm --device /dev/dri/renderD128`.
+3. В Python-окружении с установленными PyTorch и torchvision запустите команды из корня репозитория.
+
+```sh
+python -m pip install -r server/requirements.txt
+python -m pip install --no-deps 'git+https://github.com/ByteDance-Seed/Depth-Anything-3.git@3d835ec1a5802d64a8b8b15f817a1ab54809bfe4'
+mkdir -p models
+curl -fL 'https://raw.githubusercontent.com/NevermindNilas/Ai-models/4c0950ecc08629cda85754d0766d6deb2e95495a/Limbo-V3/Limbo.safetensors' -o models/Limbo.safetensors
+echo '8aa1dccf97bd7f1bca7d051ffa983dfe6faeed2356ba5eb9db63808d49f036f3  models/Limbo.safetensors' | sha256sum -c -
+```
+
+Limbo V3 от NevermindNilas выбрана первой для аниме. Оригинальные веса CC BY-NC 4.0 происходят от DA3 Small. Пользовательский сервер рассчитан на некоммерческий домашний просмотр. [Модель и лицензия](https://github.com/NevermindNilas/Ai-models/tree/4c0950ecc08629cda85754d0766d6deb2e95495a/Limbo-V3)
+
+## Запуск и подключение Quest
+
+Подставьте LAN-адрес ПК и устройство VAAPI. Если Vulkan выбрал другое устройство, задайте его индекс через `--vulkan-device`.
+
+```sh
+PC_IP=192.168.1.50
+export ANIART_PC_TOKEN="$(python -c 'import secrets; print(secrets.token_urlsafe(24))')"
+printf 'http://%s:8765#%s\n' "$PC_IP" "$ANIART_PC_TOKEN"
+python server/aniart_server.py --host "$PC_IP" --checkpoint models/Limbo.safetensors \
+  --encode-device /dev/dri/renderD128
+```
+
+Скопируйте выведенный адрес в буфер Quest и нажмите **Настройки → ПК: выкл.** Кнопка переключится на **ПК: вкл.** Затем откройте обычную 2D-серию из каталога. Приложение получит поток и автоматически включит SBS. Повторное нажатие отключает обработку на ПК для следующей серии. Используйте доверенную домашнюю сеть. Сервер принимает исходные URL и заголовки от клиента с токеном, а HTTP в этой debug-сборке не шифруется.
+
+По умолчанию выход **2560×720 SBS, 24 FPS**, глубина 504×280 раз в два кадра. Для источников 8-bit H.264 можно отдельно попробовать аппаратный декодер `--decode-device /dev/dri/renderD128`. Для 4K SBS попробуйте `--width 3840 --height 2160 --half-sbs --bitrate 28M`. Quest получит единый кадр 3840×2160, по 1920×2160 на глаз с SAR 2:1. Это тестовый режим без замера на RX 9060 XT.
+
+Для отладки можно убрать `--encode-device` и использовать libx264, отключить Vulkan через `--no-anime4k` или выбрать `--device cpu`. Сервер пишет время до первой выдачи и среднюю скорость обработки. Текущая версия рассчитана на материал 16:9. Она открывает источник отдельно для видео и звука, отдаёт первый звуковой поток и начинает воспроизведение с начала. Перемотка и переключение дорожки внутри обработанного потока пока не реализованы.

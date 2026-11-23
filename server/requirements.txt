@@ -1,0 +1,8 @@
+addict
+einops
+e3nn
+huggingface-hub
+numpy
+omegaconf
+opencv-python-headless
+safetensors
