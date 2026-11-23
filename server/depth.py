@@ -15,7 +15,8 @@ class Limbo:
         self.device = device
         if device == "cuda" and not torch.cuda.is_available():
             raise RuntimeError("AMD ROCm PyTorch GPU unavailable")
-        with open(hf_hub_download("depth-anything/DA3-SMALL", "config.json")) as config:
+        with open(hf_hub_download("depth-anything/DA3-SMALL", "config.json",
+                                  revision="e08cab65ca0ec38e7826075418411ab90cab4da3")) as config:
             net = create_object(json.load(config)["config"]).eval()
         state = {key.removeprefix("model."): value for key, value in load_file(checkpoint).items()}
         missing, _ = net.load_state_dict(state, strict=False)

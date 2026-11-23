@@ -318,7 +318,7 @@ def main():
     if (not 16 <= args.width <= 3840 or not 16 <= args.height <= 2160 or args.width % 2 or args.height % 2
             or (args.half_sbs and args.width % 4)
             or not 1 <= args.fps <= 60 or not 1 <= args.depth_every <= 12 or not 0 <= args.strength <= .1
-            or any(d < 28 or d > 896 or d % 14 for d in (args.depth_width, args.depth_height))):
+            or any(d < 28 or d > 1280 or d % 14 for d in (args.depth_width, args.depth_height))):
         parser.error("Invalid output size, FPS, depth size, interval or strength")
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
     if Path(args.checkpoint).suffix.lower() == ".onnx":

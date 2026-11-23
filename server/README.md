@@ -142,3 +142,21 @@ ANIART_BENCH_SOURCE="$PWD/clip.mp4" ANIART_DEPTH_PIPELINE_SWEEP=1 bash bench_bun
 в тысячных долях °C, мощность в мкВт, частота в Гц и загрузка в процентах.
 Архив `logs.tar.gz` включает CSV и замеры производительности. Видеофайлы
 сохраняются отдельно.
+
+### Сравнение Low, Medium и High
+
+Скачайте артефакт `Limbo-V3-PC-quality` из успешного запуска GitHub Actions
+и распакуйте два файла ONNX в папку `server/models` рядом с
+`Limbo-fp16.onnx`. [Экспорт моделей для ПК](https://github.com/ytpk/aniart-vr/actions/workflows/limbo-pc-quality.yml)
+
+Из папки `server` запустите:
+
+```sh
+ANIART_DEPTH_QUALITY_SWEEP=1 bash bench_bunny.sh models/Limbo-fp16.onnx
+```
+
+Профили используют входы Limbo V3 FP16 504×280 (Low), 700×392 (Medium) и
+1274×714 (High). Размеры кратны шагу модели в 14 пикселей. У всех профилей
+включены WebGPU, Anime4K, VAAPI, карта на каждом кадре, уточнение контуров
+и конвейер. Выход каждого профиля составляет 1280×720 на глаз. Для видеопревью
+карт добавьте `ANIART_DEPTH_PREVIEW=1`.

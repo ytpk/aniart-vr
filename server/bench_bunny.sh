@@ -11,6 +11,7 @@ gpu_sysfs="/sys/class/drm/${render_node##*/}/device"
 python_bin=${PYTHON:-python}
 refine_sweep=${ANIART_DEPTH_REFINE_SWEEP:-0}
 pipeline_sweep=${ANIART_DEPTH_PIPELINE_SWEEP:-0}
+quality_sweep=${ANIART_DEPTH_QUALITY_SWEEP:-0}
 run_dir=$(mktemp -d "$PWD/aniart-bench-$(date +%Y%m%d-%H%M%S)-XXXXXX") || exit 1
 reports="$run_dir/logs"
 mkdir -p "$reports" "$run_dir/input" "$run_dir/video" || exit 1
@@ -89,6 +90,18 @@ if [[ ! -r "$checkpoint" ]]; then
     printf 'Не найдена модель: %s\n' "$checkpoint" | tee -a "$reports/summary.txt"
     exit 1
 fi
+if [[ "$quality_sweep" == 1 ]]; then
+    model_dir=$(dirname -- "$checkpoint")
+    medium_checkpoint="$model_dir/Limbo-700x392-fp16.onnx"
+    high_checkpoint="$model_dir/Limbo-1274x714-fp16.onnx"
+    for model in "$medium_checkpoint" "$high_checkpoint"; do
+        if [[ ! -r "$model" ]]; then
+            printf 'Не найдена модель: %s. Распакуй артефакт Limbo-V3-PC-quality рядом с Low.\n' "$model" \
+            | tee -a "$reports/summary.txt"
+            exit 1
+        fi
+    done
+fi
 
 {
     ffmpeg -version
@@ -149,8 +162,13 @@ payload=$(printf '{"url":"http://127.0.0.1:%s/%s"}' "$source_port" "${input_file
 token=$("$python_bin" -c 'import secrets; print(secrets.token_urlsafe(24))') || exit 1
 
 run_profile() {
-    local name=$1 interval=$2 port status response path stream_code attempt ready=false
-    shift 2
+    local name=$1 interval=$2 model=$3 port status response path stream_code attempt ready=false
+    local ready_checks=100 stream_timeout=120
+    shift 3
+    if [[ "$quality_sweep" == 1 ]]; then
+        ready_checks=600
+        stream_timeout=600
+    fi
     printf '\n=== %s ===\n' "$name" | tee -a "$reports/summary.txt"
     port=$("$python_bin" -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])') || return
     local base="http://127.0.0.1:$port"
@@ -158,15 +176,17 @@ run_profile() {
     local raw="$run_dir/input/$name.gray" preview_size=504x280 preview_scale=504:280
     if [[ "${ANIART_DEPTH_PREVIEW:-0}" == 1 ]]; then
         set -- "$@" --depth-preview "$raw"
-        if [[ "$refine_sweep" == 1 || "$pipeline_sweep" == 1 ]]; then
+        if [[ "$refine_sweep" == 1 || "$pipeline_sweep" == 1 || "$quality_sweep" == 1 ]]; then
             set -- "$@" --depth-preview-full
             preview_size=1280x720
             preview_scale=1280:720
         fi
     fi
-    ANIART_PC_TOKEN="$token" setsid "$python_bin" -u "$script_dir/aniart_server.py"         --host 127.0.0.1 --port "$port" --checkpoint "$checkpoint" --depth-every "$interval" --ffmpeg-log         "$@" >"$log" 2>&1 &
+    ANIART_PC_TOKEN="$token" setsid "$python_bin" -u "$script_dir/aniart_server.py" \
+        --host 127.0.0.1 --port "$port" --checkpoint "$model" --depth-every "$interval" --ffmpeg-log \
+        "$@" >"$log" 2>&1 &
     server_pid=$!
-    for ((attempt=0; attempt<100; attempt++)); do
+    for ((attempt=0; attempt<ready_checks; attempt++)); do
         if ! kill -0 "$server_pid" 2>/dev/null; then break; fi
         status=$(curl -sS --max-time 1 -o /dev/null -w '%{http_code}' "$base/" 2>/dev/null)
         if [[ "$status" == 401 ]]; then ready=true; break; fi
@@ -193,7 +213,10 @@ run_profile() {
     stream_code=0
     sample_gpu "$reports/$name.gpu.csv" &
     gpu_pid=$!
-    curl -sS --max-time 120 -H "Authorization: Bearer $token"         -o "$run_dir/video/$name.ts"         -w 'GET HTTP %{http_code} | first byte %{time_starttransfer} s | total %{time_total} s | %{size_download} bytes\n'         "$base$path" >"$reports/$name.curl.txt" 2>&1 || stream_code=$?
+    curl -sS --max-time "$stream_timeout" -H "Authorization: Bearer $token" \
+        -o "$run_dir/video/$name.ts" \
+        -w 'GET HTTP %{http_code} | first byte %{time_starttransfer} s | total %{time_total} s | %{size_download} bytes\n' \
+        "$base$path" >"$reports/$name.curl.txt" 2>&1 || stream_code=$?
     stop_gpu_monitor
     printf 'curl exit: %s\n' "$stream_code" >>"$reports/$name.curl.txt"
     cat "$reports/$name.curl.txt" | tee -a "$reports/summary.txt"
@@ -213,18 +236,26 @@ run_profile() {
     fi
 }
 
+if [[ "$quality_sweep" == 1 ]]; then
+    quality_flags=(--encode-device "$device" --device webgpu --depth-refine --depth-pipeline)
+    run_profile depth-low 1 "$checkpoint" "${quality_flags[@]}" --depth-width 504 --depth-height 280
+    run_profile depth-medium 1 "$medium_checkpoint" "${quality_flags[@]}" --depth-width 700 --depth-height 392
+    run_profile depth-high 1 "$high_checkpoint" "${quality_flags[@]}" --depth-width 1274 --depth-height 714
+    exit 0
+fi
+
 if [[ "$refine_sweep" == 1 || "$pipeline_sweep" == 1 ]]; then
     depth_device=${ANIART_BENCH_DEPTH_DEVICE:-webgpu}
     if [[ "$refine_sweep" == 1 ]]; then
-        run_profile depth-720p-linear 1 --encode-device "$device" --device "$depth_device"
+        run_profile depth-720p-linear 1 "$checkpoint" --encode-device "$device" --device "$depth_device"
     fi
-    run_profile depth-720p-refined 1 --encode-device "$device" --device "$depth_device" --depth-refine
+    run_profile depth-720p-refined 1 "$checkpoint" --encode-device "$device" --device "$depth_device" --depth-refine
     if [[ "$pipeline_sweep" == 1 ]]; then
-        run_profile depth-720p-pipelined 1 --encode-device "$device" --device "$depth_device" \
+        run_profile depth-720p-pipelined 1 "$checkpoint" --encode-device "$device" --device "$depth_device" \
             --depth-refine --depth-pipeline
     fi
     if [[ "${ANIART_WEBGPU_CAPTURE_SWEEP:-0}" == 1 ]]; then
-        run_profile depth-720p-graph-capture 1 --encode-device "$device" --device webgpu \
+        run_profile depth-720p-graph-capture 1 "$checkpoint" --encode-device "$device" --device webgpu \
             --depth-refine --webgpu-graph-capture
     fi
     exit 0
@@ -232,15 +263,16 @@ fi
 
 if [[ "${ANIART_DEPTH_SWEEP:-0}" == 1 ]]; then
     for interval in 6 3 2 1; do
-        run_profile "depth-every-$interval" "$interval" --encode-device "$device"             --device "${ANIART_BENCH_DEPTH_DEVICE:-cpu}"
+        run_profile "depth-every-$interval" "$interval" "$checkpoint" --encode-device "$device" \
+            --device "${ANIART_BENCH_DEPTH_DEVICE:-cpu}"
     done
     exit 0
 fi
 
-run_profile 01-baseline 6 --no-anime4k
-run_profile 02-vaapi 6 --no-anime4k --encode-device "$device"
-run_profile 03-anime4k 6
-run_profile 04-anime4k-vaapi 6 --encode-device "$device"
+run_profile 01-baseline 6 "$checkpoint" --no-anime4k
+run_profile 02-vaapi 6 "$checkpoint" --no-anime4k --encode-device "$device"
+run_profile 03-anime4k 6 "$checkpoint"
+run_profile 04-anime4k-vaapi 6 "$checkpoint" --encode-device "$device"
 
 run_vulkan_probe() {
     local name=$1 filter=$2

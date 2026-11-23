@@ -1,0 +1,35 @@
+name: Export Limbo V3 PC quality models
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  export:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install CPU export dependencies
+        run: |
+          python -m pip install torch==2.10.0 torchvision==0.25.0 --index-url https://download.pytorch.org/whl/cpu
+          python -m pip install -r server/requirements.txt onnx==1.23.2 onnxruntime==1.24.3 e3nn==0.6.0
+          python -m pip install --no-deps 'git+https://github.com/ByteDance-Seed/Depth-Anything-3.git@3d835ec1a5802d64a8b8b15f817a1ab54809bfe4'
+      - name: Export and verify Medium and High
+        run: |
+          checkpoint="$RUNNER_TEMP/Limbo.safetensors"
+          output="$RUNNER_TEMP/limbo-pc-quality"
+          curl -fsSL --retry 3 https://raw.githubusercontent.com/NevermindNilas/Ai-models/4c0950ecc08629cda85754d0766d6deb2e95495a/Limbo-V3/Limbo.safetensors -o "$checkpoint"
+          printf '%s  %s\n' '8aa1dccf97bd7f1bca7d051ffa983dfe6faeed2356ba5eb9db63808d49f036f3' "$checkpoint" | sha256sum -c -
+          python -u server/export_limbo_onnx.py --checkpoint "$checkpoint" --output-dir "$output"
+          cp -R overlay/src/debug/assets/licenses/limbo "$output/licenses"
+          printf '\nAniart VR re-exported the checkpoint as fixed 700x392 and 1274x714 FP16 ONNX graphs.\n' >> "$output/licenses/NOTICE.txt"
+          cd "$output"
+          sha256sum Limbo-*-fp16.onnx > SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Limbo-V3-PC-quality
+          path: ${{ runner.temp }}/limbo-pc-quality/
+          if-no-files-found: error
