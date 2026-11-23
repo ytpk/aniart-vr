@@ -4,6 +4,7 @@
 import argparse
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 import numpy as np
 import onnx
@@ -70,7 +71,12 @@ def main():
         with TemporaryDirectory(dir=args.output_dir) as temp:
             fp32 = Path(temp) / "fp32.onnx"
             fp16 = Path(temp) / filename
-            with torch.no_grad():
+            # Fixed inputs allow baking the exact rotary grid before tracing.
+            # The legacy ONNX exporter cannot translate torch.cartesian_prod.
+            encoder = net.backbone.pretrained
+            positions = encoder.position_getter(1, height // encoder.patch_size,
+                                                width // encoder.patch_size, cases["pattern"].device)
+            with torch.no_grad(), patch.object(encoder, "position_getter", lambda *args, **kwargs: positions):
                 torch.onnx.export(
                     model, (cases["pattern"],), fp32, opset_version=17, dynamo=False,
                     input_names=["image"], output_names=["depth"],
