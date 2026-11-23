@@ -81,9 +81,9 @@ uniform float depthBlend;
 uniform mat4 transform;
 uniform vec4 crop;
 uniform vec2 inset;
-uniform int operation, post, stereoView;
+uniform int operation, post, stereoView, layer;
 uniform vec2 sourceTexel;
-uniform float shift;
+uniform float shift, depthBand;
 in vec2 uv;
 out vec4 color;
 vec3 source(vec2 p) {
@@ -133,6 +133,15 @@ vec3 finishPicture(vec2 p, bool sharpened) {
     }
     return value;
 }
+float layerAlpha() {
+    vec2 coord = clamp(vec2(uv.x, uv.y * depthBand), inset,
+                       vec2(1.0, depthBand) - inset);
+    float depth = light(texture(frame, (transform * vec4(coord, 0.0, 1.0)).xy).rgb);
+    float mask = layer == 1 ? smoothstep(.43, .58, depth) : smoothstep(.61, .76, depth);
+    float edge = min(min(uv.x, 1.0-uv.x), min(uv.y, 1.0-uv.y));
+    // Leave the frame and subtitles on the background plane.
+    return mask * smoothstep(.006, .043, edge) * smoothstep(.055, .23, uv.y);
+}
 void main() {
     if (operation == 5) {
         color = vec4(suppressHalo(uv), 1);
@@ -180,7 +189,9 @@ void main() {
         color = vec4(.87, .81, 1, 1);
     } else {
         bool sharpened = operation == 1 || (operation == 2 && uv.x > .5);
-        color = vec4(finishPicture(p, sharpened), 1);
+        float alpha = layer == 0 ? 1.0 : layerAlpha();
+        if (alpha < .003) discard;
+        color = vec4(finishPicture(p, sharpened), alpha);
     }
 }
 )glsl";
@@ -232,6 +243,8 @@ void main() {
         const int mode = (config >> 5) & 7;
         return mode == 1 || mode == 2 ? mode : 0;
     }
+    static constexpr int depthBandHeight = 192;
+    bool Layered() const { return ((config >> 5) & 7) == 4 && sourceH > depthBandHeight; }
     jfloatArray transformArray = nullptr;
     jmethodID latch = nullptr, upload = nullptr, close = nullptr, readConfig = nullptr, click = nullptr;
     bool opened = false, filtered = false, canFilter = false;
@@ -290,19 +303,24 @@ void main() {
         glUniformMatrix4fv(glGetUniformLocation(program, name), 1, GL_FALSE, matrix);
     }
 
-    void UseVideo(const XrMatrix4x4f& mvp, int layout, int view, int operation, float shift, int post = 0, int stereoView = 0) {
+    void UseVideo(const XrMatrix4x4f& mvp, int layout, int view, int operation, float shift, int post = 0,
+                  int stereoView = 0, int layer = 0) {
         glUseProgram(video);
         Matrix(video, "mvp", mvp.m);
         Matrix(video, "transform", transform);
+        const float band = Layered() ? float(depthBandHeight) / sourceH : 0.0f;
+        const float cropY = layout == 2 ? .5f * (1 - view) : band;
+        const float cropH = layout == 2 ? .5f : 1.0f - band;
         glUniform4f(glGetUniformLocation(video, "crop"),
-                    layout == 1 ? .5f : 1, layout == 2 ? .5f : 1,
-                    layout == 1 ? .5f * view : 0, layout == 2 ? .5f * (1 - view) : 0);
+                    layout == 1 ? .5f : 1, cropH, layout == 1 ? .5f * view : 0, cropY);
         glUniform2f(glGetUniformLocation(video, "inset"), .5f / sourceW, .5f / sourceH);
         glUniform1i(glGetUniformLocation(video, "operation"), operation);
         glUniform1i(glGetUniformLocation(video, "post"), post);
         glUniform1i(glGetUniformLocation(video, "stereoView"), stereoView);
+        glUniform1i(glGetUniformLocation(video, "layer"), layer);
+        glUniform1f(glGetUniformLocation(video, "depthBand"), band);
         glUniform2f(glGetUniformLocation(video, "sourceTexel"),
-                    (layout == 1 ? 2.f : 1.f) / sourceW, (layout == 2 ? 2.f : 1.f) / sourceH);
+                    (layout == 1 ? 2.f : 1.f) / sourceW, 1.0f / (cropH * sourceH));
         glUniform1f(glGetUniformLocation(video, "shift"), shift);
         glUniform1f(glGetUniformLocation(video, "depthBlend"), depthBlend);
         glActiveTexture(GL_TEXTURE3);
@@ -769,7 +787,8 @@ public:
         }
         glDisable(GL_CULL_FACE);
         glBindVertexArray(vao);
-        float aspect = width && height ? float(width) / height : 16.0f / 9.0f;
+        const int pictureHeight = Layered() ? height - depthBandHeight : height;
+        float aspect = width && pictureHeight > 0 ? float(width) / pictureHeight : 16.0f / 9.0f;
         const int layout = Layout();
         // Full-packed sources are very wide (SBS) or nearly square/tall (OU).
         // Half-packed sources preserve the display aspect but reduce per-eye resolution.
@@ -795,6 +814,23 @@ public:
             UseVideo(QuadMatrix(vp, screen, actualWidth, h, front), layout, layout ? view : 0,
                      operation, shift, (config >> 18) & 3, stereoView);
             glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+            const float step = .035f * std::min(6, (config >> 9) & 15);
+            if (Layered() && step > 0.0f) {
+                glEnable(GL_BLEND);
+                glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+                glDepthMask(GL_FALSE);
+                for (int layer = 1; layer <= 2; ++layer) {
+                    const float offset = step * layer;
+                    // Keep apparent size at the center seat and leave the frame behind the layers.
+                    const float scale = 1.0f + offset / screen.z;
+                    const XrVector3f plane{x * scale, y * scale, screen.z + offset};
+                    UseVideo(QuadMatrix(vp, plane, actualWidth * scale, h * scale, front),
+                             0, 0, 0, 0, (config >> 18) & 3, 0, layer);
+                    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+                }
+                glDepthMask(GL_TRUE);
+                glDisable(GL_BLEND);
+            }
         } else {
             Quad(vp, screen, actualWidth, h, front, 0);
         }

@@ -83,23 +83,14 @@ class OnnxLimbo:
         return outputs[0].astype(np.float32, copy=False).reshape(height, width)
 
 
-class Stereo:
-    def __init__(self, width, height, strength, half_sbs, refine=False):
+class DepthMap:
+    def __init__(self, width, height, refine):
         import cv2
 
         self.cv = cv2
         self.width = width
         self.height = height
-        self.half_sbs = half_sbs
         self.refine = refine
-        self.x, self.y = np.meshgrid(np.arange(width, dtype=np.float32), np.arange(height, dtype=np.float32))
-        edge = np.minimum(self.x[0], width - 1 - self.x[0])
-        horizontal = np.clip(edge / max(1, width * .05), 0, 1)
-        # The subtitle region gradually converges on the screen plane.
-        vertical = np.clip((.93 - self.y[:, 0] / height) / .14, 0, 1)
-        self.scale = (vertical[:, None] * horizontal * width * strength).astype(np.float32)
-        self.left_x, self.right_x = np.empty_like(self.x), np.empty_like(self.x)
-        self.sbs = np.empty((height, width if half_sbs else width * 2, 3), dtype=np.uint8)
         self.last = None
         self.last_luma = None
         if refine:
@@ -124,14 +115,11 @@ class Stereo:
             weight = .35 + .65 * np.clip((motion.astype(np.float32) - 7) / 32, 0, 1)
             shift = self.last + weight * (shift - self.last)
         self.last, self.last_luma = shift, luma
-        gradient = np.abs(cv.Sobel(shift, cv.CV_32F, 1, 0, ksize=3)) * .25
-        guarded = shift * (1 - .8 * np.clip(gradient / .18, 0, 1))
-        self.full_map = cv.resize(guarded, (self.width, self.height))
-        if self.refine:
-            self.full_map = self.refine_edges(self.full_map, guarded, luma, frame)
-        offset = self.full_map * self.scale
-        np.add(self.x, offset, out=self.left_x)
-        np.subtract(self.x, offset, out=self.right_x)
+        return shift, luma
+
+    def scale_map(self, depth, luma, frame):
+        base = self.cv.resize(depth, (self.width, self.height))
+        return self.refine_edges(base, depth, luma, frame) if self.refine else base
 
     def refine_edges(self, base, depth, luma, frame):
         cv = self.cv
@@ -159,6 +147,29 @@ class Stereo:
         depth = self.full_map if full else self.last
         return np.rint((depth + .5) * 255).astype(np.uint8)
 
+
+class Stereo(DepthMap):
+    def __init__(self, width, height, strength, half_sbs, refine=False):
+        super().__init__(width, height, refine)
+        self.half_sbs = half_sbs
+        self.x, self.y = np.meshgrid(np.arange(width, dtype=np.float32), np.arange(height, dtype=np.float32))
+        edge = np.minimum(self.x[0], width - 1 - self.x[0])
+        horizontal = np.clip(edge / max(1, width * .05), 0, 1)
+        # The subtitle region gradually converges on the screen plane.
+        vertical = np.clip((.93 - self.y[:, 0] / height) / .14, 0, 1)
+        self.scale = (vertical[:, None] * horizontal * width * strength).astype(np.float32)
+        self.left_x, self.right_x = np.empty_like(self.x), np.empty_like(self.x)
+        self.sbs = np.empty((height, width if half_sbs else width * 2, 3), dtype=np.uint8)
+
+    def update(self, distance, cut, frame):
+        shift, luma = super().update(distance, cut, frame)
+        gradient = np.abs(self.cv.Sobel(shift, self.cv.CV_32F, 1, 0, ksize=3)) * .25
+        guarded = shift * (1 - .8 * np.clip(gradient / .18, 0, 1))
+        self.full_map = self.scale_map(guarded, luma, frame)
+        offset = self.full_map * self.scale
+        np.add(self.x, offset, out=self.left_x)
+        np.subtract(self.x, offset, out=self.right_x)
+
     def render(self, frame):
         half = self.sbs.shape[1] // 2
         left, right = self.sbs[:, :half], self.sbs[:, half:]
@@ -174,3 +185,24 @@ class Stereo:
                                     borderMode=self.cv.BORDER_REPLICATE)
                 self.cv.resize(eye, size, dst=target, interpolation=self.cv.INTER_AREA)
         return self.sbs
+
+
+class Layers(DepthMap):
+    BAND_HEIGHT = 192
+
+    def __init__(self, width, height, refine):
+        super().__init__(width, height, refine)
+        self.atlas = np.empty((height + self.BAND_HEIGHT, width, 3), dtype=np.uint8)
+
+    def update(self, distance, cut, frame):
+        shift, luma = super().update(distance, cut, frame)
+        # Keep the real depth boundary for segmentation. Attenuation around
+        # gradients is only needed when stretching pixels for SBS.
+        self.full_map = self.scale_map(shift, luma, frame)
+        band = self.cv.resize(self.full_map, (self.width, self.BAND_HEIGHT), interpolation=self.cv.INTER_AREA)
+        gray = np.rint(255 * (band + .5)).astype(np.uint8)
+        self.atlas[self.height:] = gray[:, :, None]
+
+    def render(self, frame):
+        self.atlas[:self.height] = frame
+        return self.atlas

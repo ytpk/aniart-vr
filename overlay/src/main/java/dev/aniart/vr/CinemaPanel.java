@@ -54,6 +54,7 @@ final class CinemaPanel {
     private boolean favoritesOnly, keyboard, cyrillic = true;
     private String search = "";
     private int stereo, depth, screenSize;
+    private int layerDepth;
     private int depthModel, stereoView;
     private String depthStatus = "";
     private boolean antialias, deband, dehalo, darkRoom, smoothLaser, prefer90;
@@ -83,6 +84,7 @@ final class CinemaPanel {
         comparison = preferences.getBoolean("comparison", false);
         reverse = preferences.getBoolean("reverse_eyes", false);
         depth = Math.max(0, Math.min(10, preferences.getInt("depth", 4)));
+        layerDepth = Math.max(0, Math.min(6, preferences.getInt("layer_depth", 4)));
         stereoView = Math.max(0, Math.min(2, preferences.getInt("stereo_view", 0)));
         depthModel = Math.max(0, Math.min(10, preferences.getInt("depth_model", 1)));
         screenSize = Math.max(0, Math.min(2, preferences.getInt("screen_size", 1)));
@@ -130,9 +132,11 @@ final class CinemaPanel {
             show(HIDDEN);
         }
         boolean pcStream = activity.playingFromPc();
+        int mode = pcStream ? (activity.playingPcLayers() ? 4 : 1) : stereo;
+        int amount = mode == 4 ? layerDepth : depth;
         return page | (fast && !pcStream ? 8 : 0) | (comparison && !pcStream ? 16 : 0)
-                | ((pcStream ? 1 : stereo) << 5)
-                | (reverse ? 256 : 0) | (depth << 9) | (screenSize << 13) | (roomSound ? 1 << 15 : 0)
+                | (mode << 5)
+                | (reverse ? 256 : 0) | (amount << 9) | (screenSize << 13) | (roomSound ? 1 << 15 : 0)
                 | (depthModel << 24) | (stereoView << 28) | (antialias ? 1 << 18 : 0) | (deband ? 1 << 19 : 0)
                 | (darkRoom ? 1 << 20 : 0) | (prefer90 ? 1 << 21 : 0) | (smoothLaser ? 1 << 22 : 0) | (dehalo ? 1 << 23 : 0);
     }
@@ -154,7 +158,8 @@ final class CinemaPanel {
                 .putBoolean("reverse_eyes", reverse).putBoolean("auto_next", autoNext)
                 .putBoolean("antialias", antialias).putBoolean("deband", deband).putBoolean("dehalo", dehalo).putBoolean("dark_room", darkRoom)
                 .putBoolean("prefer_90_hz", prefer90).putBoolean("smooth_laser", smoothLaser)
-                .putInt("stereo_view", stereoView).putInt("depth", depth).putInt("depth_model", depthModel).putInt("screen_size", screenSize).apply();
+                .putInt("stereo_view", stereoView).putInt("depth", depth).putInt("layer_depth", layerDepth)
+                .putInt("depth_model", depthModel).putInt("screen_size", screenSize).apply();
         dirty = true;
     }
 
@@ -547,20 +552,12 @@ final class CinemaPanel {
     private void watch(CinemaActivity.Snapshot state) {
         var episode = state.episode();
         text(episode == null ? "Загрузка" : episode.title() + "  ·  " + episode.episode(), 32, 48, 30, INK, 775, true);
-        button(stereo == 0 ? "2D → 3D" : stereoLabel(), 824, 16, 162, 56, stereo != 0, () -> {
-            if (stereo == 0) {
-                if (depth == 0) {
-                    depth = 4;
-                    settingsChanged();
-                }
-                changeStereo(3);
-            } else if (stereo == 3) {
-                changeStereo(0);
-            } else {
-                show(SETTINGS);
-            }
-        });
-        button("A/B", 1002, 16, 148, 56, comparison, this::toggleComparison);
+        if (activity.playingFromPc()) {
+            button(stereoStatus(), 824, 16, 326, 56, true, () -> show(SETTINGS));
+        } else {
+            button(stereo == 0 ? "2D → 3D" : stereoLabel(), 824, 16, 162, 56, stereo != 0, this::toggleLocalStereo);
+            button("A/B", 1002, 16, 148, 56, comparison, this::toggleComparison);
+        }
         button("×", 1166, 16, 82, 56, false, () -> show(HIDDEN));
         String status = state.status();
         if (episode != null && status.isEmpty()) status = episode.variant();
@@ -585,6 +582,20 @@ final class CinemaPanel {
         button("+", 891, 193, 63, 75, false, () -> activity.changeVolume(.1f));
         button("Каталог", 966, 193, 129, 75, false, () -> show(LIBRARY));
         button("Настройки", 1107, 193, 141, 75, false, () -> show(SETTINGS));
+    }
+
+    private void toggleLocalStereo() {
+        if (stereo == 0) {
+            if (depth == 0) {
+                depth = 4;
+                settingsChanged();
+            }
+            changeStereo(3);
+        } else if (stereo == 3) {
+            changeStereo(0);
+        } else {
+            show(SETTINGS);
+        }
     }
 
     private void settings(String notice) {
@@ -615,18 +626,30 @@ final class CinemaPanel {
             dehalo = !dehalo;
             settingsChanged();
         });
-        String[] options = {"2D", "SBS · рядом", "OU · сверху/снизу", "2D → 3D"};
-        for (int i = 0; i < options.length; i++) {
-            int value = i;
-            button(options[i], 32 + i * 306, 308, 290, 62, stereo == i, () -> changeStereo(value));
+        boolean pcPlayback = activity.playingFromPc();
+        if (pcPlayback) {
+            boolean layers = activity.pcLayersEnabled();
+            button("Параллакс", 32, 308, 290, 62, layers, () -> activity.setPcLayers(true));
+            button("SBS · рядом", 338, 308, 290, 62, !layers, () -> activity.setPcLayers(false));
+            if (layers) {
+                button("−", 32, 385, 74, 58, false, () -> changeLayerDepth(-1));
+                text("Отступ " + layerDepth + "/6", 126, 422, 24, MUTED, 182, true);
+                button("+", 316, 385, 74, 58, false, () -> changeLayerDepth(1));
+            }
+        } else {
+            String[] options = {"2D", "SBS · рядом", "OU · сверху/снизу", "2D → 3D"};
+            for (int i = 0; i < options.length; i++) {
+                int value = i;
+                button(options[i], 32 + i * 306, 308, 290, 62, stereo == i, () -> changeStereo(value));
+            }
         }
-        if (stereo != 0) {
+        if ((!pcPlayback && stereo != 0) || (pcPlayback && !activity.pcLayersEnabled())) {
             button(reverse ? "Глаза: R / L" : "Глаза: L / R", 32, 385, 274, 58, reverse, () -> {
                 reverse = !reverse;
                 settingsChanged();
             });
         }
-        if (stereo == 3) {
+        if (!pcPlayback && stereo == 3) {
             button("−", 320, 385, 74, 58, false, () -> {
                 depth = Math.max(0, depth - 1);
                 settingsChanged();
@@ -710,7 +733,8 @@ final class CinemaPanel {
     }
 
     private String frameSize() {
-        return frameWidth > 0 ? frameWidth + "×" + frameHeight : "Нет кадра";
+        int height = frameHeight - (activity.playingPcLayers() ? PcProcessing.DEPTH_BAND_HEIGHT : 0);
+        return frameWidth > 0 && height > 0 ? frameWidth + "×" + height : "Нет кадра";
     }
 
     private String filterLabel() {
@@ -725,7 +749,7 @@ final class CinemaPanel {
     }
 
     private String stereoStatus() {
-        if (activity.playingFromPc()) return "SBS · ПК";
+        if (activity.playingFromPc()) return activity.playingPcLayers() ? "Параллакс · ПК" : "SBS · ПК";
         if (stereo == 3) {
             if (depth == 0) return "Псевдо-3D: глубина 0";
             String model = DepthModels.label(depthModel);
@@ -733,6 +757,11 @@ final class CinemaPanel {
             return depthReady ? model + " " + depth + "/10" : model + ": ожидание карты";
         }
         return stereoLabel();
+    }
+
+    private void changeLayerDepth(int delta) {
+        layerDepth = Math.max(0, Math.min(6, layerDepth + delta));
+        settingsChanged();
     }
 
     private String stereoLabel() {

@@ -4,6 +4,7 @@
 import argparse
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import suppress
+from dataclasses import dataclass
 import hmac
 import json
 import logging
@@ -11,6 +12,7 @@ import os
 from pathlib import Path
 import re
 import secrets
+import socket
 import subprocess
 import threading
 import time
@@ -19,7 +21,7 @@ from urllib.parse import urlsplit
 
 import numpy as np
 
-from depth import Limbo, OnnxLimbo, Stereo
+from depth import Layers, Limbo, OnnxLimbo, Stereo
 
 
 def source_request(body):
@@ -41,7 +43,18 @@ def source_request(body):
     return input_options + ["-i", url]
 
 
-def commands(args, source):
+def probe_duration(source):
+    try:
+        probe = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", *source],
+            capture_output=True, timeout=8, check=True,
+        )
+        return max(0, round(float(probe.stdout.strip()) * 1000))
+    except (subprocess.SubprocessError, OSError, ValueError, OverflowError):
+        return 0
+
+
+def commands(args, source, mode="sbs"):
     decoder = ["ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error", "-filter_threads", "2"]
     if args.anime4k and args.vulkan_device is not None:
         decoder += ["-init_hw_device", f"vulkan=shader:{args.vulkan_device}", "-filter_hw_device", "shader"]
@@ -66,16 +79,26 @@ def commands(args, source):
     encoder = ["ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error", "-filter_threads", "2"]
     if args.encode_device:
         encoder += ["-init_hw_device", f"vaapi=encoder:{args.encode_device}", "-filter_hw_device", "encoder"]
+    width = args.width * 2 if mode == "sbs" and not args.half_sbs else args.width
+    height = args.height + Layers.BAND_HEIGHT if mode == "layers" else args.height
     encoder += ["-f", "rawvideo", "-pixel_format", "rgb24", "-video_size",
-                f"{args.width if args.half_sbs else args.width * 2}x{args.height}", "-framerate", str(args.fps), "-i", "pipe:0"]
+                f"{width}x{height}", "-framerate", str(args.fps), "-i", "pipe:0"]
     encoder += source + ["-map", "0:v", "-map", "1:a:0?", "-c:a", "aac", "-b:a", "160k"]
-    sar = "setsar=2" if args.half_sbs else "setsar=1"
+    sar = "setsar=2" if mode == "sbs" and args.half_sbs else "setsar=1"
     if args.encode_device:
         encoder += ["-vf", sar + ",format=nv12,hwupload", "-c:v", "h264_vaapi", "-pix_fmt", "vaapi"]
     else:
         encoder += ["-vf", sar, "-c:v", "libx264", "-threads", "4", "-preset", "veryfast", "-tune", "zerolatency", "-pix_fmt", "yuv420p"]
     encoder += ["-b:v", args.bitrate, "-g", str(args.fps), "-bf", "0", "-shortest", "-f", "mpegts", "pipe:1"]
     return decoder, encoder
+
+
+@dataclass
+class Job:
+    source: list[str]
+    mode: str
+    duration_ms: int
+    expires_at: float
 
 
 class Server(ThreadingHTTPServer):
@@ -87,6 +110,7 @@ class Server(ThreadingHTTPServer):
         self.jobs = {}
         self.lock = threading.Lock()
         self.viewer = threading.Lock()
+        self.interrupt_viewer = None
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -111,21 +135,30 @@ class Handler(BaseHTTPRequestHandler):
             length = int(self.headers.get("Content-Length", 0))
             if not 0 < length <= 32768:
                 raise ValueError()
-            source = source_request(json.loads(self.rfile.read(length)))
+            body = json.loads(self.rfile.read(length))
+            source = source_request(body)
+            mode = body.get("stereo", "sbs")
+            seekable = body.get("seekable", False)
+            if mode not in ("sbs", "layers") or type(seekable) is not bool:
+                raise ValueError()
         except (ValueError, KeyError, TypeError, AttributeError):
             self.send_error(400, "Invalid stream request")
             return
+        duration_ms = probe_duration(source) if seekable else 0
         now = time.monotonic()
         key = secrets.token_urlsafe(18)
         with self.server.lock:
             jobs = self.server.jobs
-            for old in [k for k, (expiry, _) in jobs.items() if expiry < now]:
+            for old in [k for k, job in jobs.items() if job.expires_at < now]:
                 del jobs[old]
             if len(jobs) >= 16:
-                self.send_error(429)
-                return
-            jobs[key] = (now + 120, source)
-        response = json.dumps({"path": f"/v1/streams/{key}.ts", "stereo": "sbs"}).encode()
+                if not seekable:
+                    self.send_error(429)
+                    return
+                del jobs[min(jobs, key=lambda job_id: jobs[job_id].expires_at)]
+            jobs[key] = Job(source, mode, duration_ms, now + 120)
+        response = json.dumps({"path": f"/v1/streams/{key}.ts", "stereo": mode,
+                               "duration_ms": duration_ms}).encode()
         self.send_response(201)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(response)))
@@ -135,33 +168,59 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         if not self.authorized():
             return
-        match = re.fullmatch(r"/v1/streams/([A-Za-z0-9_-]+)\.ts", self.path)
+        match = re.fullmatch(r"/v1/streams/([A-Za-z0-9_-]+)\.ts(?:\?start_ms=([0-9]{1,12}))?", self.path)
         if not match:
             self.send_error(404)
             return
-        if not self.server.viewer.acquire(blocking=False):
+        key, offset = match.groups()
+        start_ms = int(offset or 0)
+        with self.server.lock:
+            job = self.server.jobs.get(key)
+            if not job or job.expires_at < time.monotonic():
+                self.send_error(404)
+                return
+            if start_ms and start_ms >= job.duration_ms:
+                self.send_error(416, "Position outside source duration")
+                return
+            if offset is not None and self.server.interrupt_viewer:
+                self.server.interrupt_viewer()
+        if not self.server.viewer.acquire(timeout=5 if offset is not None else 0):
             self.send_error(503, "Another stream is closing or active")
             return
         try:
             with self.server.lock:
-                job = self.server.jobs.get(match[1])
-            if not job or job[0] < time.monotonic():
-                self.send_error(404)
-                return
-            self.stream(job[1])
+                job.expires_at = float("inf")
+            self.stream(job, start_ms)
         finally:
+            with self.server.lock:
+                self.server.interrupt_viewer = None
+                job.expires_at = time.monotonic() + (7200 if job.duration_ms else 120)
             self.server.viewer.release()
 
-    def stream(self, source):
+    def stream(self, job, start_ms):
         args = self.server.args
-        decoder_cmd, encoder_cmd = commands(args, source)
+        source = job.source
+        if start_ms:
+            source = [*source[:-2], "-ss", f"{start_ms / 1000:.3f}", *source[-2:]]
+        decoder_cmd, encoder_cmd = commands(args, source, job.mode)
         stderr = None if args.ffmpeg_log else subprocess.DEVNULL
-        decoder = subprocess.Popen(decoder_cmd, stdout=subprocess.PIPE, stderr=stderr,
-                                   cwd=Path(__file__).resolve().parents[1])
+        decoder = None
         encoder = None
         writer = None
         stopping = threading.Event()
         started = time.monotonic()
+
+        def stop_processes():
+            stopping.set()
+            for process in (decoder, encoder):
+                if process is not None and process.poll() is None:
+                    with suppress(ProcessLookupError):
+                        process.kill()
+
+        def interrupt():
+            stop_processes()
+            with suppress(OSError):
+                self.connection.shutdown(socket.SHUT_RDWR)
 
         def produce():
             preview = None
@@ -170,7 +229,10 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 if args.depth_preview:
                     preview = open(args.depth_preview, "xb")
-                stereo = Stereo(args.width, args.height, args.strength, args.half_sbs, args.depth_refine)
+                if job.mode == "layers":
+                    renderer = Layers(args.width, args.height, args.depth_refine)
+                else:
+                    renderer = Stereo(args.width, args.height, args.strength, args.half_sbs, args.depth_refine)
                 sample = None
                 source_index = 0
                 frame_id = 0
@@ -214,16 +276,16 @@ class Handler(BaseHTTPRequestHandler):
                         pending = pool.submit(prepare_next)
                     if prediction is not None:
                         post_started = time.monotonic()
-                        stereo.update(prediction, cut, frame)
+                        renderer.update(prediction, cut, frame)
                         post_seconds += time.monotonic() - post_started
                         inference_seconds += elapsed
                         depth_count += 1
                         if preview:
-                            preview_map = stereo.preview(args.depth_preview_full).tobytes()
+                            preview_map = renderer.preview(args.depth_preview_full).tobytes()
                     warp_started = time.monotonic()
-                    sbs = stereo.render(frame)
+                    output = renderer.render(frame)
                     warp_seconds += time.monotonic() - warp_started
-                    encoder.stdin.write(memoryview(sbs))
+                    encoder.stdin.write(memoryview(output))
                     if preview:
                         preview.write(preview_map)
                     frame_id += 1
@@ -251,10 +313,18 @@ class Handler(BaseHTTPRequestHandler):
                     preview.close()
 
         try:
+            with self.server.lock:
+                self.server.interrupt_viewer = interrupt
+            decoder = subprocess.Popen(decoder_cmd, stdout=subprocess.PIPE, stderr=stderr,
+                                       cwd=Path(__file__).resolve().parents[1])
             encoder = subprocess.Popen(encoder_cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=stderr)
+            if stopping.is_set():
+                return
             writer = threading.Thread(target=produce)
             writer.start()
             chunk = encoder.stdout.read1(65536)
+            if stopping.is_set() and not chunk:
+                return
             if not chunk:
                 self.send_error(502, "No output from FFmpeg; check video, Vulkan and VAAPI")
                 return
@@ -270,10 +340,7 @@ class Handler(BaseHTTPRequestHandler):
         except (BrokenPipeError, ConnectionResetError, TimeoutError):
             pass
         finally:
-            stopping.set()
-            for process in (decoder, encoder):
-                if process is not None and process.poll() is None:
-                    process.kill()
+            stop_processes()
             if writer:
                 writer.join()
             for process in (decoder, encoder):

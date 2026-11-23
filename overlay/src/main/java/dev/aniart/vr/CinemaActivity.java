@@ -56,6 +56,10 @@ public final class CinemaActivity extends NativeActivity {
     private final ExecutorService onlinePlayback = Executors.newSingleThreadExecutor();
     private volatile PcProcessing pcProcessing;
     private volatile boolean playingFromPc;
+    private volatile boolean pcLayers;
+    private volatile PcProcessing.Stream pcStream;
+    private PcProcessing activePc;
+    private long pcOffset;
     private final ExecutorService pcRequests = Executors.newSingleThreadExecutor();
     private volatile String notice = "";
     private volatile Snapshot snapshot = new Snapshot(null, "Выберите видео", 0, 0, false, false, 1f, 1f);
@@ -101,6 +105,7 @@ public final class CinemaActivity extends NativeActivity {
             catch (IllegalArgumentException ignored) { }
         }
         autoNext = preferences.getBoolean("auto_next", true);
+        pcLayers = preferences.getBoolean("pc_layers", true);
         roomSound = preferences.getBoolean("room_sound", false);
         volume = preferences.getFloat("volume", 1f);
         speed = preferences.getFloat("speed", 1f);
@@ -267,8 +272,8 @@ public final class CinemaActivity extends NativeActivity {
             preferences.edit().putBoolean("room_sound", enabled).apply();
             if (player != null && playing != null && player.getPlayerError() == null
                     && player.getPlaybackState() != Player.STATE_ENDED) {
-                long position = player.isCurrentMediaItemSeekable() ? player.getCurrentPosition() : C.TIME_UNSET;
-                startPlayer(playing, position, playRequested);
+                long position = seekable() ? playbackPosition() : C.TIME_UNSET;
+                startPlayer(playing, position, playRequested, activePc);
             }
         });
     }
@@ -295,12 +300,12 @@ public final class CinemaActivity extends NativeActivity {
     void toggle() { ui.post(this::togglePlayback); }
     void step(long delta) {
         ui.post(() -> {
-            if (player != null) seekTo(player.getCurrentPosition() + delta);
+            if (player != null) seekTo(playbackPosition() + delta);
         });
     }
     void seek(float fraction) {
         ui.post(() -> {
-            if (player != null && player.getDuration() > 0) seekTo((long) (fraction * player.getDuration()));
+            if (player != null && duration() > 0) seekTo((long) (fraction * duration()));
         });
     }
     void next(Catalog.Episode current) {
@@ -388,19 +393,40 @@ public final class CinemaActivity extends NativeActivity {
     }
 
     private void seekTo(long position) {
-        if (player != null && player.isCurrentMediaItemSeekable()) {
+        if (!seekable()) return;
+        if (playingFromPc) {
+            Catalog.Episode episode = playing;
+            PcProcessing pc = activePc;
+            PcProcessing.Stream stream = pcStream;
+            boolean autoPlay = playRequested;
+            releasePlayer();
+            openPcPlayer(episode, position, autoPlay, pc, stream);
+        } else {
             generation.incrementAndGet();
-            player.seekTo(Math.max(0, Math.min(position, player.getDuration())));
+            player.seekTo(Math.max(0, Math.min(position, duration())));
             publish();
         }
     }
 
+    private long playbackPosition() {
+        return pcOffset + (player == null ? 0 : Math.max(0, player.getCurrentPosition()));
+    }
+
+    private long duration() {
+        if (pcStream != null && pcStream.duration() > 0) return pcStream.duration();
+        return player == null ? 0 : Math.max(0, player.getDuration());
+    }
+
+    private boolean seekable() {
+        if (player == null) return false;
+        return playingFromPc ? pcStream != null && pcStream.duration() > 0 : player.isCurrentMediaItemSeekable();
+    }
+
     private void savePosition() {
-        if (player == null || playing == null || playingShared
-                || !player.isCurrentMediaItemSeekable()) return;
-        long position = player.getCurrentPosition();
-        long duration = player.getDuration();
-        long resume = duration > 0 && duration - position <= 5000 ? 0 : position;
+        if (playing == null || playingShared || !seekable()) return;
+        long position = playbackPosition();
+        long length = duration();
+        long resume = length > 0 && length - position <= 5000 ? 0 : position;
         preferences.edit().putLong("resume:" + playing.key(), resume).apply();
     }
 
@@ -417,6 +443,9 @@ public final class CinemaActivity extends NativeActivity {
         playing = null;
         playingShared = false;
         playingFromPc = false;
+        pcStream = null;
+        activePc = null;
+        pcOffset = 0;
         playRequested = false;
     }
 
@@ -424,6 +453,10 @@ public final class CinemaActivity extends NativeActivity {
         if (playing == null) return;
         if (player == null) {
             if (!status.equals("Подготовка потока на ПК")) play(playing, false);
+            return;
+        }
+        if (player.getPlayerError() != null && activePc != null) {
+            startPlayer(playing, playbackPosition(), true, activePc);
             return;
         }
         if (player.getPlayerError() != null || player.getPlaybackState() == Player.STATE_ENDED) {
@@ -448,9 +481,12 @@ public final class CinemaActivity extends NativeActivity {
     }
 
     private void startPlayer(Catalog.Episode episode, long position, boolean autoPlay) {
+        startPlayer(episode, position, autoPlay, pcProcessing);
+    }
+
+    private void startPlayer(Catalog.Episode episode, long position, boolean autoPlay, PcProcessing pc) {
         if (surface == null) return;
         releasePlayer();
-        PcProcessing pc = pcProcessing;
         String scheme = episode.url().getScheme();
         if (pc == null || episode.stereo() != 0 || !("https".equals(scheme) || "http".equals(scheme))) {
             openPlayer(episode, position, autoPlay, episode.url().toString(), episode.mimeType(), episode.headers(), false);
@@ -458,15 +494,17 @@ public final class CinemaActivity extends NativeActivity {
         }
         playing = episode;
         playingFromPc = true;
+        boolean layers = pcLayers;
         status = "Подготовка потока на ПК";
         publish();
         int request = generation.get();
         pcRequests.execute(() -> {
             try {
-                String stream = pc.prepare(episode);
+                PcProcessing.Stream stream = pc.prepare(episode, layers);
                 ui.post(() -> {
                     if (request == generation.get() && surface != null && !isDestroyed()) {
-                        openPlayer(episode, C.TIME_UNSET, autoPlay, stream, "video/mp2t", pc.headers(), true);
+                        if (layers && !stream.layers()) notice = "Обновите сервер ПК для параллакса";
+                        openPcPlayer(episode, position, autoPlay, pc, stream);
                     }
                 });
             } catch (Exception error) {
@@ -478,6 +516,14 @@ public final class CinemaActivity extends NativeActivity {
                 });
             }
         });
+    }
+
+    private void openPcPlayer(Catalog.Episode episode, long position, boolean autoPlay,
+                              PcProcessing pc, PcProcessing.Stream stream) {
+        activePc = pc;
+        pcStream = stream;
+        pcOffset = stream.clamp(position);
+        openPlayer(episode, C.TIME_UNSET, autoPlay, stream.at(pcOffset), "video/mp2t", pc.headers(), true);
     }
 
     private void openPlayer(Catalog.Episode episode, long position, boolean autoPlay, String url, String mime,
@@ -568,15 +614,27 @@ public final class CinemaActivity extends NativeActivity {
     }
 
     private void publish() {
-        snapshot = new Snapshot(playing, status, player == null ? 0 : player.getCurrentPosition(),
-                player == null ? 0 : Math.max(0, player.getDuration()),
+        snapshot = new Snapshot(playing, status, playbackPosition(), duration(),
                 player != null && playRequested && player.getPlaybackState() != Player.STATE_ENDED
                         && player.getPlayerError() == null,
-                player != null && player.isCurrentMediaItemSeekable(), volume, speed);
+                seekable(), volume, speed);
     }
 
     boolean pcEnabled() { return pcProcessing != null; }
     boolean playingFromPc() { return playingFromPc; }
+    boolean playingPcLayers() { return pcStream != null && pcStream.layers(); }
+    boolean pcLayersEnabled() { return pcLayers; }
+
+    void setPcLayers(boolean layers) {
+        ui.post(() -> {
+            if (pcLayers == layers) return;
+            pcLayers = layers;
+            preferences.edit().putBoolean("pc_layers", pcLayers).apply();
+            if (activePc != null && player != null && playing != null) {
+                startPlayer(playing, playbackPosition(), playRequested, activePc);
+            }
+        });
+    }
 
     void togglePcProcessing() {
         ui.post(() -> {
