@@ -30,6 +30,33 @@ class MonoDepth(torch.nn.Module):
         return depth.reshape(1, self.height, self.width)
 
 
+def export_fp32(model, example, path):
+    encoder = model.backbone.pretrained
+    rotary_grid = encoder.position_getter(1, model.height // encoder.patch_size,
+                                          model.width // encoder.patch_size, example.device)
+    add_position = model.head._add_pos_embed
+    positions = {}
+
+    def add_cached_position(features, width, height, ratio=.1):
+        key = (tuple(int(d) for d in features.shape), width, height, ratio)
+        if key not in positions:
+            positions[key] = add_position(torch.zeros_like(features), width, height, ratio)
+        return features + positions[key]
+
+    # Compute static coordinates eagerly. Tracing the grid builders can emit
+    # unsupported Cartesian products and mixed FP32/FP64 ONNX coordinates.
+    with (
+        torch.no_grad(),
+        patch.object(encoder, "position_getter", lambda *args, **kwargs: rotary_grid),
+        patch.object(model.head, "_add_pos_embed", add_cached_position),
+    ):
+        model(example)
+        torch.onnx.export(
+            model, (example,), path, opset_version=17, dynamo=False,
+            input_names=["image"], output_names=["depth"],
+        )
+
+
 def cpu_session(path, optimized_path=None):
     options = ort.SessionOptions()
     options.intra_op_num_threads = 4
@@ -79,17 +106,7 @@ def main():
             fp32 = Path(temp) / "fp32.onnx"
             folded = Path(temp) / "folded.onnx"
             fp16 = Path(temp) / filename
-            # Fixed inputs allow baking the exact rotary grid before tracing.
-            # The legacy ONNX exporter cannot translate torch.cartesian_prod.
-            encoder = net.backbone.pretrained
-            positions = encoder.position_getter(1, height // encoder.patch_size,
-                                                width // encoder.patch_size, cases["pattern"].device)
-            with torch.no_grad(), patch.object(encoder, "position_getter", lambda *args, **kwargs: positions):
-                torch.onnx.export(
-                    model, (cases["pattern"],), fp32, opset_version=17, dynamo=False,
-                    input_names=["image"], output_names=["depth"],
-                )
-            # Fold fixed head coordinates in FP32 before converting the graph.
+            export_fp32(model, cases["pattern"], fp32)
             cpu_session(fp32, optimized_path=folded)
             graph = convert_float_to_float16(onnx.load(folded))
             OnnxModel(graph).topological_sort()
