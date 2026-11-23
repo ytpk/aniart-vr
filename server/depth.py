@@ -76,7 +76,10 @@ class OnnxLimbo:
         image = self.cv.resize(frame, (width, height)).astype(np.float32) / 255
         image = np.ascontiguousarray(((image - self.mean) / self.std).transpose(2, 0, 1)[None],
                                      dtype=self.input_dtype)
-        return self.session.run(["depth"], {self.input_name: image})[0].astype(np.float32, copy=False).reshape(height, width)
+        outputs = self.session.run(["depth"], {self.input_name: image})
+        if not outputs:
+            raise RuntimeError("ONNX Runtime returned no depth output")
+        return outputs[0].astype(np.float32, copy=False).reshape(height, width)
 
 
 class Stereo:

@@ -96,8 +96,11 @@ ANIART_DEPTH_SWEEP=1 ANIART_BENCH_DEPTH_DEVICE=webgpu ANIART_DEPTH_PREVIEW=1 bas
 ### Уточнение контуров в 720p
 
 Флаг сервера `--depth-refine` уточняет карту по яркости кадра в разрешении
-глаза. Вход Limbo 504×280 остаётся прежним. Для сравнения линейного
-масштабирования и уточнения на каждом кадре запустите:
+глаза. Вход Limbo 504×280 соответствует разрешению режима `Low` в тесте
+TheAnimeScripter. В том же тесте `High` рассчитывает глубину в исходном
+разрешении 1280×720. [Сравнение режимов Limbo V3](https://github.com/NevermindNilas/Ai-models/tree/main/Limbo-V3#video-stability)
+
+Для сравнения линейного масштабирования и уточнения на каждом кадре запустите:
 
 ```sh
 ANIART_DEPTH_REFINE_SWEEP=1 ANIART_DEPTH_PREVIEW=1 bash bench_bunny.sh models/Limbo-fp16.onnx
@@ -111,3 +114,18 @@ ANIART_DEPTH_REFINE_SWEEP=1 ANIART_DEPTH_PREVIEW=1 bash bench_bunny.sh models/Li
 Сервер проверяет, что результаты меняются при смене кадра и воспроизводятся
 при возврате к исходному кадру. Если WebGPU или модель не поддержат захват
 графа, ошибка будет в логе только этого прогона.
+
+### Параллельная обработка кадров
+
+С `--depth-pipeline` сервер читает следующий кадр и рассчитывает его глубину,
+пока текущий проходит уточнение, стереосдвиг и передачу в кодировщик.
+Стерео использует карты по порядку, а в очереди находится максимум один кадр.
+Сравнение на Radeon с картой на каждом кадре и уточнением в 720p:
+
+```sh
+ANIART_DEPTH_PIPELINE_SWEEP=1 bash bench_bunny.sh models/Limbo-fp16.onnx
+```
+
+Профили `depth-720p-refined` и `depth-720p-pipelined` используют Anime4K,
+WebGPU и VAAPI. В `summary.txt` есть общий FPS, время первого байта и
+отдельные замеры расчёта карты, её обработки и стереосдвига.

@@ -7,6 +7,8 @@ repo_dir=$(dirname "$script_dir")
 checkpoint=${1:-"$script_dir/models/Limbo.onnx"}
 device=${2:-/dev/dri/renderD128}
 python_bin=${PYTHON:-python}
+refine_sweep=${ANIART_DEPTH_REFINE_SWEEP:-0}
+pipeline_sweep=${ANIART_DEPTH_PIPELINE_SWEEP:-0}
 run_dir=$(mktemp -d "$PWD/aniart-bench-$(date +%Y%m%d-%H%M%S)-XXXXXX") || exit 1
 reports="$run_dir/logs"
 mkdir -p "$reports" "$run_dir/input" "$run_dir/video" || exit 1
@@ -100,7 +102,7 @@ run_profile() {
     local raw="$run_dir/input/$name.gray" preview_size=504x280 preview_scale=504:280
     if [[ "${ANIART_DEPTH_PREVIEW:-0}" == 1 ]]; then
         set -- "$@" --depth-preview "$raw"
-        if [[ "${ANIART_DEPTH_REFINE_SWEEP:-0}" == 1 ]]; then
+        if [[ "$refine_sweep" == 1 || "$pipeline_sweep" == 1 ]]; then
             set -- "$@" --depth-preview-full
             preview_size=1280x720
             preview_scale=1280:720
@@ -152,10 +154,16 @@ run_profile() {
     fi
 }
 
-if [[ "${ANIART_DEPTH_REFINE_SWEEP:-0}" == 1 ]]; then
+if [[ "$refine_sweep" == 1 || "$pipeline_sweep" == 1 ]]; then
     depth_device=${ANIART_BENCH_DEPTH_DEVICE:-webgpu}
-    run_profile depth-720p-linear 1 --encode-device "$device" --device "$depth_device"
+    if [[ "$refine_sweep" == 1 ]]; then
+        run_profile depth-720p-linear 1 --encode-device "$device" --device "$depth_device"
+    fi
     run_profile depth-720p-refined 1 --encode-device "$device" --device "$depth_device" --depth-refine
+    if [[ "$pipeline_sweep" == 1 ]]; then
+        run_profile depth-720p-pipelined 1 --encode-device "$device" --device "$depth_device" \
+            --depth-refine --depth-pipeline
+    fi
     if [[ "${ANIART_WEBGPU_CAPTURE_SWEEP:-0}" == 1 ]]; then
         run_profile depth-720p-graph-capture 1 --encode-device "$device" --device webgpu \
             --depth-refine --webgpu-graph-capture

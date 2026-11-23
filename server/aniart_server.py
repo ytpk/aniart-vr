@@ -2,6 +2,8 @@
 """Single-viewer Aniart VR LAN transcoder for finite HTTP(S) video sources."""
 
 import argparse
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import suppress
 import hmac
 import json
 import logging
@@ -163,30 +165,58 @@ class Handler(BaseHTTPRequestHandler):
 
         def produce():
             preview = None
+            pool = None
+            pending = None
             try:
                 if args.depth_preview:
                     preview = open(args.depth_preview, "xb")
                 stereo = Stereo(args.width, args.height, args.strength, args.half_sbs, args.depth_refine)
                 sample = None
+                source_index = 0
                 frame_id = 0
                 depth_count = 0
-                depth_seconds = 0.0
+                inference_seconds = 0.0
+                post_seconds = 0.0
                 warp_seconds = 0.0
                 preview_map = b""
                 frame_bytes = args.width * args.height * 3
-                while not stopping.is_set():
+
+                def prepare_next():
+                    nonlocal sample, source_index
+                    if stopping.is_set():
+                        return None
                     raw = decoder.stdout.read(frame_bytes)
-                    if len(raw) != frame_bytes:
-                        break
+                    if len(raw) != frame_bytes or stopping.is_set():
+                        return None
                     frame = np.frombuffer(raw, np.uint8).reshape(args.height, args.width, 3)
                     current = frame[::32, ::32].astype(np.float32)
                     cut = sample is None or np.abs(current - sample).mean() > 28
                     sample = current
-                    if cut or frame_id % args.depth_every == 0:
+                    prediction = None
+                    elapsed = 0.0
+                    if cut or source_index % args.depth_every == 0:
                         depth_started = time.monotonic()
                         prediction = self.server.model(frame, args.depth_width, args.depth_height)
+                        elapsed = time.monotonic() - depth_started
+                    source_index += 1
+                    return frame, cut, prediction, elapsed
+
+                if args.depth_pipeline:
+                    pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="depth")
+                    pending = pool.submit(prepare_next)
+                while not stopping.is_set():
+                    prepared = pending.result() if pending is not None else prepare_next()
+                    if prepared is None or stopping.is_set():
+                        break
+                    frame, cut, prediction, elapsed = prepared
+                    # Only prefetch one frame. Stereo history is updated here, in source order.
+                    if pool is not None:
+                        pending = pool.submit(prepare_next)
+                    if prediction is not None:
+                        post_started = time.monotonic()
                         stereo.update(prediction, cut, frame)
-                        depth_seconds += time.monotonic() - depth_started
+                        post_seconds += time.monotonic() - post_started
+                        inference_seconds += elapsed
                         depth_count += 1
                         if preview:
                             preview_map = stereo.preview(args.depth_preview_full).tobytes()
@@ -199,15 +229,26 @@ class Handler(BaseHTTPRequestHandler):
                     frame_id += 1
                     if frame_id % 120 == 0:
                         logging.info("Processed %d frames at %.1f fps", frame_id, frame_id / (time.monotonic() - started))
-                        logging.info("Depth timing: %d maps for %d frames | %.1f ms per map",
-                                     depth_count, frame_id, depth_seconds * 1000 / depth_count)
+                        logging.info(
+                            "Depth timing: %d maps for %d frames | %.1f ms per map (inference %.1f ms, post %.1f ms)",
+                            depth_count, frame_id, (inference_seconds + post_seconds) * 1000 / depth_count,
+                            inference_seconds * 1000 / depth_count, post_seconds * 1000 / depth_count,
+                        )
                         logging.info("Stereo warp timing: %.1f ms per frame", warp_seconds * 1000 / frame_id)
             except (BrokenPipeError, ValueError, RuntimeError, OSError) as error:
                 logging.warning("Frame processing stopped (%s)", type(error).__name__)
             finally:
+                stopping.set()
+                if pool is not None:
+                    # Wake a running pipe read if processing ends before decoder EOF.
+                    if pending is not None and not pending.done() and not pending.cancel():
+                        with suppress(ProcessLookupError):
+                            decoder.kill()
+                    pool.shutdown(wait=True, cancel_futures=True)
+                with suppress(BrokenPipeError):
+                    encoder.stdin.close()
                 if preview:
                     preview.close()
-                encoder.stdin.close()
 
         try:
             encoder = subprocess.Popen(encoder_cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=stderr)
@@ -263,6 +304,7 @@ def main():
     parser.add_argument("--strength", type=float, default=.022)
     parser.add_argument("--bitrate", default="12M")
     parser.add_argument("--depth-refine", action="store_true", help="Refine the depth map using full-resolution image edges")
+    parser.add_argument("--depth-pipeline", action="store_true", help="Run depth inference for the next frame in parallel")
     parser.add_argument("--depth-preview-full", action="store_true", help="Write depth preview at per-eye video resolution")
     parser.add_argument("--depth-preview", type=Path, help="Write one raw gray depth map per output frame for benchmarking")
     parser.add_argument("--ffmpeg-log", action="store_true", help="Show FFmpeg errors in the terminal")
