@@ -30,11 +30,18 @@ class MonoDepth(torch.nn.Module):
         return depth.reshape(1, self.height, self.width)
 
 
-def verify(path, model, cases):
+def cpu_session(path, optimized_path=None):
     options = ort.SessionOptions()
     options.intra_op_num_threads = 4
     options.log_severity_level = 3
-    session = ort.InferenceSession(path, options, providers=["CPUExecutionProvider"])
+    if optimized_path is not None:
+        options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_BASIC
+        options.optimized_model_filepath = str(optimized_path)
+    return ort.InferenceSession(path, options, providers=["CPUExecutionProvider"])
+
+
+def verify(path, model, cases):
+    session = cpu_session(path)
     with torch.no_grad():
         for name, image in cases.items():
             expected = model(image).numpy()
@@ -70,6 +77,7 @@ def main():
         filename = f"Limbo-{width}x{height}-fp16.onnx"
         with TemporaryDirectory(dir=args.output_dir) as temp:
             fp32 = Path(temp) / "fp32.onnx"
+            folded = Path(temp) / "folded.onnx"
             fp16 = Path(temp) / filename
             # Fixed inputs allow baking the exact rotary grid before tracing.
             # The legacy ONNX exporter cannot translate torch.cartesian_prod.
@@ -81,7 +89,9 @@ def main():
                     model, (cases["pattern"],), fp32, opset_version=17, dynamo=False,
                     input_names=["image"], output_names=["depth"],
                 )
-            graph = convert_float_to_float16(onnx.load(fp32))
+            # Fold fixed head coordinates in FP32 before converting the graph.
+            cpu_session(fp32, optimized_path=folded)
+            graph = convert_float_to_float16(onnx.load(folded))
             OnnxModel(graph).topological_sort()
             del graph.graph.value_info[:]
             onnx.helper.set_model_props(graph, metadata | {"aniart_export": f"Fixed {width}x{height} FP16"})
