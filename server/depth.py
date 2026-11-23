@@ -47,7 +47,7 @@ class OnnxLimbo:
         inputs = self.session.get_inputs()
         outputs = self.session.get_outputs()
         if (len(inputs) != 1 or inputs[0].shape != [1, 3, height, width]
-                or inputs[0].type != "tensor(float)" or len(outputs) != 1):
+                or inputs[0].type != "tensor(float)" or not any(out.name == "depth" for out in outputs)):
             raise ValueError(f"Expected a FP32 Limbo ONNX model with input 1×3×{height}×{width}")
         self.input_name = inputs[0].name
         self.cv = cv2
@@ -57,7 +57,7 @@ class OnnxLimbo:
     def __call__(self, frame, width, height):
         image = self.cv.resize(frame.astype(np.float32), (width, height)) / 255
         image = np.ascontiguousarray(((image - self.mean) / self.std).transpose(2, 0, 1)[None])
-        return self.session.run(None, {self.input_name: image})[0].reshape(height, width)
+        return self.session.run(["depth"], {self.input_name: image})[0].reshape(height, width)
 
 
 class Stereo:
