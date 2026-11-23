@@ -77,7 +77,9 @@ PY
 source_pid=$!
 source_port=
 for ((attempt=0; attempt<30; attempt++)); do
-    read -r source_port <"$reports/source-http.log" || true
+    if [[ -s "$reports/source-http.log" ]]; then
+        read -r source_port <"$reports/source-http.log" || true
+    fi
     [[ "$source_port" =~ ^[0-9]+$ ]] && break
     sleep .1
 done
@@ -89,7 +91,7 @@ payload=$(printf '{"url":"http://127.0.0.1:%s/bunny.mp4"}' "$source_port")
 token=$("$python_bin" -c 'import secrets; print(secrets.token_urlsafe(24))') || exit 1
 
 run_profile() {
-    local name=$1 port status response path stream_code ready=false
+    local name=$1 port status response path stream_code attempt ready=false
     shift
     printf '\n=== %s ===\n' "$name" | tee -a "$reports/summary.txt"
     port=$("$python_bin" -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])') || return
