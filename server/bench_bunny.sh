@@ -1,0 +1,153 @@
+#!/usr/bin/env bash
+# Run a local Big Buck Bunny benchmark without Quest or an APK.
+set -uo pipefail
+
+script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+repo_dir=$(dirname "$script_dir")
+checkpoint=${1:-"$script_dir/models/Limbo.onnx"}
+device=${2:-/dev/dri/renderD128}
+python_bin=${PYTHON:-python}
+run_dir=$(mktemp -d "$PWD/aniart-bench-$(date +%Y%m%d-%H%M%S)-XXXXXX") || exit 1
+reports="$run_dir/logs"
+mkdir -p "$reports" "$run_dir/input" "$run_dir/video" || exit 1
+
+server_pid=
+source_pid=
+stop_server() {
+    if [[ -n "$server_pid" ]]; then
+        kill -TERM -- "-$server_pid" 2>/dev/null || true
+        wait "$server_pid" 2>/dev/null || true
+        server_pid=
+    fi
+}
+
+finish() {
+    stop_server
+    if [[ -n "$source_pid" ]]; then
+        kill "$source_pid" 2>/dev/null || true
+        wait "$source_pid" 2>/dev/null || true
+    fi
+    if tar -C "$run_dir" -czf "$run_dir/logs.tar.gz" logs; then
+        printf '\nПрикрепи этот архив: %s\n' "$run_dir/logs.tar.gz"
+    fi
+}
+trap finish EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+for tool in "$python_bin" curl ffmpeg ffprobe setsid timeout tar; do
+    if ! command -v "$tool" >/dev/null; then
+        printf 'Не найдена команда %s\n' "$tool" | tee -a "$reports/summary.txt"
+        exit 1
+    fi
+done
+if [[ ! -r "$checkpoint" ]]; then
+    printf 'Не найдена модель: %s\n' "$checkpoint" | tee -a "$reports/summary.txt"
+    exit 1
+fi
+
+{
+    ffmpeg -version
+    "$python_bin" -c 'import sys, cv2, numpy, onnxruntime as ort; print(sys.version); print("OpenCV", cv2.__version__, "NumPy", numpy.__version__, "ORT", ort.__version__, ort.get_available_providers())'
+    if command -v lspci >/dev/null; then lspci -nnk | grep -iEA3 'VGA|Display'; fi
+    printf '\nVAAPI: %s → ' "$device"
+    readlink -f "/sys/class/drm/${device##*/}/device"
+    ls -l "$device"
+    if command -v vainfo >/dev/null; then timeout 15 vainfo --display drm --device "$device"; fi
+    if command -v vulkaninfo >/dev/null; then timeout 20 vulkaninfo --summary; fi
+} >"$reports/system.log" 2>&1
+
+clip=https://test-videos.co.uk/vids/bigbuckbunny/mp4/h264/720/Big_Buck_Bunny_720_10s_1MB.mp4
+if ! curl -fSL --retry 2 --connect-timeout 10 --max-time 60 "$clip" -o "$run_dir/input/bunny.mp4" >"$reports/download.log" 2>&1; then
+    printf 'Не удалось скачать Big Buck Bunny. См. download.log.\n' | tee -a "$reports/summary.txt"
+    exit 1
+fi
+ffprobe -v error -show_streams -show_format -of json "$run_dir/input/bunny.mp4" >"$reports/source.json" 2>&1
+
+# Serve only the test file. An ephemeral port avoids touching existing services.
+"$python_bin" -u - "$run_dir/input" >"$reports/source-http.log" 2>&1 <<'PY' &
+from functools import partial
+from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
+import sys
+
+with ThreadingHTTPServer(("127.0.0.1", 0), partial(SimpleHTTPRequestHandler, directory=sys.argv[1])) as server:
+    print(server.server_port, flush=True)
+    server.serve_forever()
+PY
+source_pid=$!
+source_port=
+for ((attempt=0; attempt<30; attempt++)); do
+    read -r source_port <"$reports/source-http.log" || true
+    [[ "$source_port" =~ ^[0-9]+$ ]] && break
+    sleep .1
+done
+if [[ ! "$source_port" =~ ^[0-9]+$ ]]; then
+    printf 'Локальный HTTP-источник не запустился. См. source-http.log.\n' | tee -a "$reports/summary.txt"
+    exit 1
+fi
+payload=$(printf '{"url":"http://127.0.0.1:%s/bunny.mp4"}' "$source_port")
+token=$("$python_bin" -c 'import secrets; print(secrets.token_urlsafe(24))') || exit 1
+
+run_profile() {
+    local name=$1 port status response path stream_code ready=false
+    shift
+    printf '\n=== %s ===\n' "$name" | tee -a "$reports/summary.txt"
+    port=$("$python_bin" -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])') || return
+    local base="http://127.0.0.1:$port"
+    local log="$reports/$name.server.log"
+    ANIART_PC_TOKEN="$token" setsid "$python_bin" -u "$script_dir/aniart_server.py"         --host 127.0.0.1 --port "$port" --checkpoint "$checkpoint" --depth-every 6 --ffmpeg-log         "$@" >"$log" 2>&1 &
+    server_pid=$!
+    for ((attempt=0; attempt<100; attempt++)); do
+        if ! kill -0 "$server_pid" 2>/dev/null; then break; fi
+        status=$(curl -sS --max-time 1 -o /dev/null -w '%{http_code}' "$base/" 2>/dev/null)
+        if [[ "$status" == 401 ]]; then ready=true; break; fi
+        sleep .2
+    done
+    if [[ "$ready" == false ]]; then
+        printf 'Сервер не запустился. См. %s.server.log\n' "$name" | tee -a "$reports/summary.txt"
+        stop_server
+        return
+    fi
+    response="$reports/$name.post.json"
+    status=$(curl -sS --max-time 10 -o "$response" -w '%{http_code}'         -H "Authorization: Bearer $token" -H 'Content-Type: application/json'         --data-binary "$payload" "$base/v1/streams" 2>>"$log")
+    if [[ "$status" != 201 ]]; then
+        printf 'POST: HTTP %s\n' "$status" | tee -a "$reports/summary.txt"
+        stop_server
+        return
+    fi
+    path=$("$python_bin" -c 'import json, sys; print(json.load(sys.stdin)["path"])' <"$response")
+    if [[ ! "$path" =~ ^/v1/streams/[a-zA-Z0-9_-]+\.ts$ ]]; then
+        printf 'Сервер вернул неверный путь.\n' | tee -a "$reports/summary.txt"
+        stop_server
+        return
+    fi
+    stream_code=0
+    curl -sS --max-time 120 -H "Authorization: Bearer $token"         -o "$run_dir/video/$name.ts"         -w 'GET HTTP %{http_code} | first byte %{time_starttransfer} s | total %{time_total} s | %{size_download} bytes\n'         "$base$path" >"$reports/$name.curl.txt" 2>&1 || stream_code=$?
+    printf 'curl exit: %s\n' "$stream_code" >>"$reports/$name.curl.txt"
+    cat "$reports/$name.curl.txt" | tee -a "$reports/summary.txt"
+    ffprobe -v error -count_frames -show_entries stream=codec_name,width,height,avg_frame_rate,nb_read_frames         -of compact "$run_dir/video/$name.ts" >"$reports/$name.ffprobe.txt" 2>&1
+    stop_server
+    grep -E 'First output in|Processed [0-9]+ frames' "$log" | tee -a "$reports/summary.txt"
+}
+
+run_profile 01-baseline --no-anime4k
+run_profile 02-vaapi --no-anime4k --encode-device "$device"
+run_profile 03-anime4k
+run_profile 04-anime4k-vaapi --encode-device "$device"
+
+run_vulkan_probe() {
+    local name=$1 filter=$2
+    shift 2
+    (
+        cd "$repo_dir" || exit 1
+        timeout 30 ffmpeg -hide_banner -loglevel debug "$@"             -f lavfi -i 'testsrc2=size=1280x720:rate=24'             -vf "$filter" -frames:v 1 -f null -
+    ) >"$reports/$name.log" 2>&1
+    printf '%s exit: %s\n' "$name" "$?" | tee -a "$reports/summary.txt"
+}
+
+filter=libplacebo=w=1600:h=900:format=yuv420p
+run_vulkan_probe 05-vulkan-plain "$filter"
+run_vulkan_probe 06-vulkan-shader "$filter:custom_shader_path=Anime4K_Upscale_CNN_x2_S.glsl"
+run_vulkan_probe 07-vulkan-explicit "$filter:custom_shader_path=Anime4K_Upscale_CNN_x2_S.glsl"     -init_hw_device vulkan=shader:0 -filter_hw_device shader
+
+printf '\nВидео и логи сохранены в %s\n' "$run_dir"
