@@ -162,12 +162,17 @@ class Handler(BaseHTTPRequestHandler):
         started = time.monotonic()
 
         def produce():
+            preview = None
             try:
+                if args.depth_preview:
+                    preview = open(args.depth_preview, "xb")
                 stereo = Stereo(args.width, args.height, args.strength, args.half_sbs)
                 sample = None
                 frame_id = 0
                 depth_count = 0
                 depth_seconds = 0.0
+                warp_seconds = 0.0
+                preview_map = b""
                 frame_bytes = args.width * args.height * 3
                 while not stopping.is_set():
                     raw = decoder.stdout.read(frame_bytes)
@@ -180,18 +185,28 @@ class Handler(BaseHTTPRequestHandler):
                     if cut or frame_id % args.depth_every == 0:
                         depth_started = time.monotonic()
                         prediction = self.server.model(frame, args.depth_width, args.depth_height)
-                        stereo.update(prediction, cut)
+                        stereo.update(prediction, cut, frame)
                         depth_seconds += time.monotonic() - depth_started
                         depth_count += 1
-                    encoder.stdin.write(stereo.render(frame).tobytes())
+                        if preview:
+                            preview_map = stereo.preview().tobytes()
+                    warp_started = time.monotonic()
+                    sbs = stereo.render(frame)
+                    warp_seconds += time.monotonic() - warp_started
+                    encoder.stdin.write(memoryview(sbs))
+                    if preview:
+                        preview.write(preview_map)
                     frame_id += 1
                     if frame_id % 120 == 0:
                         logging.info("Processed %d frames at %.1f fps", frame_id, frame_id / (time.monotonic() - started))
                         logging.info("Depth timing: %d maps for %d frames | %.1f ms per map",
                                      depth_count, frame_id, depth_seconds * 1000 / depth_count)
+                        logging.info("Stereo warp timing: %.1f ms per frame", warp_seconds * 1000 / frame_id)
             except (BrokenPipeError, ValueError, RuntimeError, OSError) as error:
                 logging.warning("Frame processing stopped (%s)", type(error).__name__)
             finally:
+                if preview:
+                    preview.close()
                 encoder.stdin.close()
 
         try:
@@ -246,6 +261,7 @@ def main():
     parser.add_argument("--depth-every", type=int, default=2)
     parser.add_argument("--strength", type=float, default=.022)
     parser.add_argument("--bitrate", default="12M")
+    parser.add_argument("--depth-preview", type=Path, help="Write one raw gray depth map per output frame for benchmarking")
     parser.add_argument("--ffmpeg-log", action="store_true", help="Show FFmpeg errors in the terminal")
     parser.add_argument("--no-anime4k", action="store_false", dest="anime4k")
     args = parser.parse_args()

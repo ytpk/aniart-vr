@@ -97,6 +97,10 @@ run_profile() {
     port=$("$python_bin" -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])') || return
     local base="http://127.0.0.1:$port"
     local log="$reports/$name.server.log"
+    local raw="$run_dir/input/$name.gray"
+    if [[ "${ANIART_DEPTH_PREVIEW:-0}" == 1 ]]; then
+        set -- "$@" --depth-preview "$raw"
+    fi
     ANIART_PC_TOKEN="$token" setsid "$python_bin" -u "$script_dir/aniart_server.py"         --host 127.0.0.1 --port "$port" --checkpoint "$checkpoint" --depth-every "$interval" --ffmpeg-log         "$@" >"$log" 2>&1 &
     server_pid=$!
     for ((attempt=0; attempt<100; attempt++)); do
@@ -129,11 +133,22 @@ run_profile() {
     cat "$reports/$name.curl.txt" | tee -a "$reports/summary.txt"
     ffprobe -v error -count_frames -show_entries stream=codec_name,width,height,avg_frame_rate,nb_read_frames         -of compact "$run_dir/video/$name.ts" >"$reports/$name.ffprobe.txt" 2>&1
     stop_server
-    grep -E 'First output in|Processed [0-9]+ frames|Depth timing' "$log" | tee -a "$reports/summary.txt"
+    grep -E 'First output in|Processed [0-9]+ frames|Depth timing|Stereo warp timing' "$log" | tee -a "$reports/summary.txt"
+    if [[ -s "$raw" ]]; then
+        if ffmpeg -nostdin -hide_banner -loglevel error -i "$run_dir/input/bunny.mp4" \
+            -f rawvideo -pixel_format gray -video_size 504x280 -framerate 24 -i "$raw" \
+            -filter_complex_threads 2 \
+            -filter_complex '[0:v]fps=24,scale=504:280,setsar=1,format=yuv420p[video];[1:v]setsar=1,format=yuv420p[depth];[video][depth]hstack=shortest=1' \
+            -an -c:v libx264 -preset fast -crf 19 -movflags +faststart "$run_dir/video/$name-depth.mp4" \
+            >"$reports/$name.preview.log" 2>&1; then
+            rm -- "$raw"
+            printf 'Depth preview: video/%s-depth.mp4\n' "$name" | tee -a "$reports/summary.txt"
+        fi
+    fi
 }
 
 if [[ "${ANIART_DEPTH_SWEEP:-0}" == 1 ]]; then
-    for interval in 6 3 2; do
+    for interval in 6 3 2 1; do
         run_profile "depth-every-$interval" "$interval" --encode-device "$device"             --device "${ANIART_BENCH_DEPTH_DEVICE:-cpu}"
     done
     exit 0

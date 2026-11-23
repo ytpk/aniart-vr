@@ -70,7 +70,7 @@ class OnnxLimbo:
         self.std = np.array([.229, .224, .225], dtype=np.float32)
 
     def __call__(self, frame, width, height):
-        image = self.cv.resize(frame.astype(np.float32), (width, height)) / 255
+        image = self.cv.resize(frame, (width, height)).astype(np.float32) / 255
         image = np.ascontiguousarray(((image - self.mean) / self.std).transpose(2, 0, 1)[None],
                                      dtype=self.input_dtype)
         return self.session.run(["depth"], {self.input_name: image})[0].astype(np.float32, copy=False).reshape(height, width)
@@ -83,14 +83,19 @@ class Stereo:
         self.cv = cv2
         self.width = width
         self.height = height
-        self.strength = strength
         self.half_sbs = half_sbs
         self.x, self.y = np.meshgrid(np.arange(width, dtype=np.float32), np.arange(height, dtype=np.float32))
-        edge = np.minimum(self.x, width - 1 - self.x)
-        self.fade = np.clip(edge / max(1, width * .05), 0, 1)
+        edge = np.minimum(self.x[0], width - 1 - self.x[0])
+        horizontal = np.clip(edge / max(1, width * .05), 0, 1)
+        # The subtitle region gradually converges on the screen plane.
+        vertical = np.clip((.93 - self.y[:, 0] / height) / .14, 0, 1)
+        self.scale = (vertical[:, None] * horizontal * width * strength).astype(np.float32)
+        self.left_x, self.right_x = np.empty_like(self.x), np.empty_like(self.x)
+        self.sbs = np.empty((height, width if half_sbs else width * 2, 3), dtype=np.uint8)
         self.last = None
+        self.last_luma = None
 
-    def update(self, distance, cut):
+    def update(self, distance, cut, frame):
         cv = self.cv
         valid = np.isfinite(distance) & (distance > 0)
         disparity = np.divide(1, np.maximum(distance, 1e-5), out=np.zeros_like(distance), where=valid)
@@ -99,23 +104,35 @@ class Stereo:
             lo, hi = np.percentile(disparity[valid], [5, 95])
             if hi > lo:
                 shift = np.clip((disparity - lo) / (hi - lo) - .5, -.5, .5).astype(np.float32)
+        h, w = distance.shape
+        luma = cv.cvtColor(cv.resize(frame, (w, h)), cv.COLOR_RGB2GRAY)
         if self.last is not None and not cut:
-            shift = .65 * self.last + .35 * shift
-        self.last = shift
+            # Keep more history on still areas and follow changed contours faster.
+            motion = cv.dilate(cv.absdiff(luma, self.last_luma), np.ones((3, 3), np.uint8))
+            weight = .35 + .65 * np.clip((motion.astype(np.float32) - 7) / 32, 0, 1)
+            shift = self.last + weight * (shift - self.last)
+        self.last, self.last_luma = shift, luma
         gradient = np.abs(cv.Sobel(shift, cv.CV_32F, 1, 0, ksize=3)) * .25
-        shift *= 1 - .8 * np.clip(gradient / .18, 0, 1)
-        self.shift = cv.resize(shift, (self.width, self.height)) * self.fade * self.width * self.strength
-        # The subtitle region gradually converges on the screen plane.
-        self.shift *= np.clip((.93 - self.y / self.height) / .14, 0, 1)
-        self.shift = self.shift.astype(np.float32, copy=False)
+        guarded = shift * (1 - .8 * np.clip(gradient / .18, 0, 1))
+        offset = cv.resize(guarded, (self.width, self.height)) * self.scale
+        np.add(self.x, offset, out=self.left_x)
+        np.subtract(self.x, offset, out=self.right_x)
+
+    def preview(self):
+        return np.rint((self.last + .5) * 255).astype(np.uint8)
 
     def render(self, frame):
-        left = self.cv.remap(frame, self.x + self.shift, self.y, self.cv.INTER_LINEAR,
-                             borderMode=self.cv.BORDER_REPLICATE)
-        right = self.cv.remap(frame, self.x - self.shift, self.y, self.cv.INTER_LINEAR,
-                              borderMode=self.cv.BORDER_REPLICATE)
-        if self.half_sbs:
-            size = (self.width // 2, self.height)
-            left = self.cv.resize(left, size, interpolation=self.cv.INTER_AREA)
-            right = self.cv.resize(right, size, interpolation=self.cv.INTER_AREA)
-        return np.concatenate((left, right), axis=1)
+        half = self.sbs.shape[1] // 2
+        left, right = self.sbs[:, :half], self.sbs[:, half:]
+        if not self.half_sbs:
+            self.cv.remap(frame, self.left_x, self.y, self.cv.INTER_LINEAR, dst=left,
+                          borderMode=self.cv.BORDER_REPLICATE)
+            self.cv.remap(frame, self.right_x, self.y, self.cv.INTER_LINEAR, dst=right,
+                          borderMode=self.cv.BORDER_REPLICATE)
+        else:
+            size = (half, self.height)
+            for coords, target in ((self.left_x, left), (self.right_x, right)):
+                eye = self.cv.remap(frame, coords, self.y, self.cv.INTER_LINEAR,
+                                    borderMode=self.cv.BORDER_REPLICATE)
+                self.cv.resize(eye, size, dst=target, interpolation=self.cv.INTER_AREA)
+        return self.sbs
