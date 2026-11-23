@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
-# Run a local Big Buck Bunny benchmark without Quest or an APK.
+# Run a local video benchmark without Quest or an APK.
 set -uo pipefail
 
 script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 repo_dir=$(dirname "$script_dir")
 checkpoint=${1:-"$script_dir/models/Limbo.onnx"}
 device=${2:-/dev/dri/renderD128}
+render_node=$(readlink -f -- "$device" 2>/dev/null) || render_node=$device
+gpu_sysfs="/sys/class/drm/${render_node##*/}/device"
 python_bin=${PYTHON:-python}
 refine_sweep=${ANIART_DEPTH_REFINE_SWEEP:-0}
 pipeline_sweep=${ANIART_DEPTH_PIPELINE_SWEEP:-0}
@@ -15,6 +17,7 @@ mkdir -p "$reports" "$run_dir/input" "$run_dir/video" || exit 1
 
 server_pid=
 source_pid=
+gpu_pid=
 stop_server() {
     if [[ -n "$server_pid" ]]; then
         kill -TERM -- "-$server_pid" 2>/dev/null || true
@@ -23,7 +26,45 @@ stop_server() {
     fi
 }
 
+stop_gpu_monitor() {
+    if [[ -n "$gpu_pid" ]]; then
+        kill "$gpu_pid" 2>/dev/null || true
+        wait "$gpu_pid" 2>/dev/null || true
+        gpu_pid=
+    fi
+}
+
+sample_gpu() {
+    local sensor column label value row header=unix_s
+    local -a sensors=()
+    for sensor in "$gpu_sysfs"/{gpu_busy_percent,mem_busy_percent} \
+        "$gpu_sysfs"/hwmon/hwmon*/{temp[0-9]*_input,power[0-9]*_average,power[0-9]*_input,freq[0-9]*_input}; do
+        [[ -r "$sensor" ]] || continue
+        sensors+=("$sensor")
+        column=${sensor##*/}
+        if [[ "$column" == *_input ]] &&
+            IFS= read -r label 2>/dev/null < "${sensor%_input}_label"; then
+            column+=":${label//,/_}"
+        fi
+        header+=",$column"
+    done
+    (( ${#sensors[@]} )) || return 0
+    {
+        printf '%s\n' "$header"
+        while true; do
+            row=$EPOCHREALTIME
+            for sensor in "${sensors[@]}"; do
+                IFS= read -r value 2>/dev/null < "$sensor" || value=
+                row+=",$value"
+            done
+            printf '%s\n' "$row"
+            sleep 1
+        done
+    } >"$1"
+}
+
 finish() {
+    stop_gpu_monitor
     stop_server
     if [[ -n "$source_pid" ]]; then
         kill "$source_pid" 2>/dev/null || true
@@ -53,18 +94,32 @@ fi
     "$python_bin" -c 'import sys, cv2, numpy, onnxruntime as ort; print(sys.version); print("OpenCV", cv2.__version__, "NumPy", numpy.__version__, "ORT", ort.__version__, ort.get_available_providers())'
     if command -v lspci >/dev/null; then lspci -nnk | grep -iEA3 'VGA|Display'; fi
     printf '\nVAAPI: %s → ' "$device"
-    readlink -f "/sys/class/drm/${device##*/}/device"
+    readlink -f "$gpu_sysfs"
     ls -l "$device"
     if command -v vainfo >/dev/null; then timeout 15 vainfo --display drm --device "$device"; fi
     if command -v vulkaninfo >/dev/null; then timeout 20 vulkaninfo --summary; fi
 } >"$reports/system.log" 2>&1
 
-clip=https://test-videos.co.uk/vids/bigbuckbunny/mp4/h264/720/Big_Buck_Bunny_720_10s_1MB.mp4
-if ! curl -fSL --retry 2 --connect-timeout 10 --max-time 60 "$clip" -o "$run_dir/input/bunny.mp4" >"$reports/download.log" 2>&1; then
-    printf 'Не удалось скачать Big Buck Bunny. См. download.log.\n' | tee -a "$reports/summary.txt"
+input_file="$run_dir/input/bunny.mp4"
+if [[ -n "${ANIART_BENCH_SOURCE:-}" ]]; then
+    clip=$ANIART_BENCH_SOURCE
+    [[ "$clip" = /* ]] || clip="$PWD/$clip"
+    input_file="$run_dir/input/clip"
+    if [[ ! -f "$clip" || ! -r "$clip" ]] || ! ln -s -- "$clip" "$input_file"; then
+        printf 'Не удалось открыть ANIART_BENCH_SOURCE.\n' | tee -a "$reports/summary.txt"
+        exit 1
+    fi
+else
+    clip=https://test-videos.co.uk/vids/bigbuckbunny/mp4/h264/720/Big_Buck_Bunny_720_10s_1MB.mp4
+    if ! curl -fSL --retry 2 --connect-timeout 10 --max-time 60 "$clip" -o "$input_file" >"$reports/download.log" 2>&1; then
+        printf 'Не удалось скачать Big Buck Bunny. См. download.log.\n' | tee -a "$reports/summary.txt"
+        exit 1
+    fi
+fi
+if ! ffprobe -v error -show_streams -show_format -of json "$input_file" >"$reports/source.json" 2>&1; then
+    printf 'Не удалось прочитать видео. См. source.json.\n' | tee -a "$reports/summary.txt"
     exit 1
 fi
-ffprobe -v error -show_streams -show_format -of json "$run_dir/input/bunny.mp4" >"$reports/source.json" 2>&1
 
 # Serve only the test file. An ephemeral port avoids touching existing services.
 "$python_bin" -u - "$run_dir/input" >"$reports/source-http.log" 2>&1 <<'PY' &
@@ -89,7 +144,7 @@ if [[ ! "$source_port" =~ ^[0-9]+$ ]]; then
     printf 'Локальный HTTP-источник не запустился. См. source-http.log.\n' | tee -a "$reports/summary.txt"
     exit 1
 fi
-payload=$(printf '{"url":"http://127.0.0.1:%s/bunny.mp4"}' "$source_port")
+payload=$(printf '{"url":"http://127.0.0.1:%s/%s"}' "$source_port" "${input_file##*/}")
 token=$("$python_bin" -c 'import secrets; print(secrets.token_urlsafe(24))') || exit 1
 
 run_profile() {
@@ -135,14 +190,17 @@ run_profile() {
         return
     fi
     stream_code=0
+    sample_gpu "$reports/$name.gpu.csv" &
+    gpu_pid=$!
     curl -sS --max-time 120 -H "Authorization: Bearer $token"         -o "$run_dir/video/$name.ts"         -w 'GET HTTP %{http_code} | first byte %{time_starttransfer} s | total %{time_total} s | %{size_download} bytes\n'         "$base$path" >"$reports/$name.curl.txt" 2>&1 || stream_code=$?
+    stop_gpu_monitor
     printf 'curl exit: %s\n' "$stream_code" >>"$reports/$name.curl.txt"
     cat "$reports/$name.curl.txt" | tee -a "$reports/summary.txt"
     ffprobe -v error -count_frames -show_entries stream=codec_name,width,height,avg_frame_rate,nb_read_frames         -of compact "$run_dir/video/$name.ts" >"$reports/$name.ffprobe.txt" 2>&1
     stop_server
     grep -E 'First output in|Processed [0-9]+ frames|Depth timing|Stereo warp timing' "$log" | tee -a "$reports/summary.txt"
     if [[ -s "$raw" ]]; then
-        if ffmpeg -nostdin -hide_banner -loglevel error -i "$run_dir/input/bunny.mp4" \
+        if ffmpeg -nostdin -hide_banner -loglevel error -i "$input_file" \
             -f rawvideo -pixel_format gray -video_size "$preview_size" -framerate 24 -i "$raw" \
             -filter_complex_threads 2 \
             -filter_complex "[0:v]fps=24,scale=$preview_scale,setsar=1,format=yuv420p[video];[1:v]setsar=1,format=yuv420p[depth];[video][depth]hstack=shortest=1" \
