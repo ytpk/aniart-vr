@@ -37,7 +37,7 @@ class Limbo:
 
 
 class OnnxLimbo:
-    def __init__(self, checkpoint, width, height, device="cpu"):
+    def __init__(self, checkpoint, width, height, device="cpu", capture=False):
         import cv2
         import onnxruntime as ort
 
@@ -51,7 +51,10 @@ class OnnxLimbo:
             if gpu is None:
                 raise RuntimeError("ONNX WebGPU did not find a compatible Vulkan GPU")
             options.add_session_config_entry("session.disable_cpu_ep_fallback", "1")
-            options.add_provider_for_devices([gpu], {"powerPreference": "high-performance"})
+            provider_options = {"powerPreference": "high-performance"}
+            if capture:
+                provider_options["enableGraphCapture"] = "1"
+            options.add_provider_for_devices([gpu], provider_options)
             self.session = ort.InferenceSession(checkpoint, sess_options=options)
         else:
             self.session = ort.InferenceSession(checkpoint, options, providers=["CPUExecutionProvider"])
@@ -95,6 +98,10 @@ class Stereo:
         self.sbs = np.empty((height, width if half_sbs else width * 2, 3), dtype=np.uint8)
         self.last = None
         self.last_luma = None
+        if refine:
+            self.guide_high = np.empty((height, width), dtype=np.uint8)
+            self.guided_high = np.empty((height, width), dtype=np.float32)
+            self.intercept_high = np.empty_like(self.guided_high)
 
     def update(self, distance, cut, frame):
         cv = self.cv
@@ -133,11 +140,15 @@ class Stereo:
         intercept = mean_depth - slope * mean_guide
 
         size = (self.width, self.height)
-        full_guide = cv.cvtColor(frame, cv.COLOR_RGB2GRAY).astype(np.float32) / 255
-        guided = cv.resize(cv.blur(slope, (5, 5)), size) * full_guide
-        guided += cv.resize(cv.blur(intercept, (5, 5)), size)
-        # Only correct locally. This limits copying texture and subtitles into depth.
-        base += np.clip(guided - base, -.08, .08)
+        cv.cvtColor(frame, cv.COLOR_RGB2GRAY, dst=self.guide_high)
+        cv.resize(cv.blur(slope, (5, 5)), size, dst=self.guided_high)
+        cv.resize(cv.blur(intercept, (5, 5)), size, dst=self.intercept_high)
+        np.multiply(self.guided_high, self.guide_high, out=self.guided_high)
+        self.guided_high *= 1 / 255
+        self.guided_high += self.intercept_high
+        # Limit copying texture and subtitles into depth.
+        self.guided_high -= base
+        base += np.clip(self.guided_high, -.08, .08, out=self.guided_high)
         return np.clip(base, -.5, .5, out=base)
 
     def preview(self, full=False):

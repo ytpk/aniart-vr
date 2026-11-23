@@ -156,6 +156,10 @@ if [[ "${ANIART_DEPTH_REFINE_SWEEP:-0}" == 1 ]]; then
     depth_device=${ANIART_BENCH_DEPTH_DEVICE:-webgpu}
     run_profile depth-720p-linear 1 --encode-device "$device" --device "$depth_device"
     run_profile depth-720p-refined 1 --encode-device "$device" --device "$depth_device" --depth-refine
+    if [[ "${ANIART_WEBGPU_CAPTURE_SWEEP:-0}" == 1 ]]; then
+        run_profile depth-720p-graph-capture 1 --encode-device "$device" --device webgpu \
+            --depth-refine --webgpu-graph-capture
+    fi
     exit 0
 fi
 

@@ -249,6 +249,7 @@ def main():
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--device", choices=("cpu", "cuda", "webgpu"), help="ONNX uses CPU or WebGPU; safetensors use PyTorch")
+    parser.add_argument("--webgpu-graph-capture", action="store_true", help="Experimentally replay the compiled WebGPU graph")
     parser.add_argument("--vulkan-device", type=int, help="Vulkan device index; by default libplacebo selects one")
     parser.add_argument("--decode-device")
     parser.add_argument("--encode-device")
@@ -267,6 +268,8 @@ def main():
     parser.add_argument("--ffmpeg-log", action="store_true", help="Show FFmpeg errors in the terminal")
     parser.add_argument("--no-anime4k", action="store_false", dest="anime4k")
     args = parser.parse_args()
+    if args.webgpu_graph_capture and args.device != "webgpu":
+        parser.error("--webgpu-graph-capture requires --device webgpu")
     args.token = os.environ.get("ANIART_PC_TOKEN", "")
     if len(args.token) < 16 or not re.fullmatch(r"[A-Za-z0-9_-]+", args.token):
         parser.error("Set ANIART_PC_TOKEN to at least 16 URL-safe characters")
@@ -279,14 +282,24 @@ def main():
     if Path(args.checkpoint).suffix.lower() == ".onnx":
         if args.device == "cuda":
             parser.error("Use --device webgpu or cpu for an ONNX model")
-        model = OnnxLimbo(args.checkpoint, args.depth_width, args.depth_height, args.device or "cpu")
+        model = OnnxLimbo(args.checkpoint, args.depth_width, args.depth_height, args.device or "cpu",
+                          capture=args.webgpu_graph_capture)
         if args.device == "webgpu":
             start = time.monotonic()
-            test = model(np.zeros((args.depth_height, args.depth_width, 3), dtype=np.uint8),
-                         args.depth_width, args.depth_height)
+            height, width = args.depth_height, args.depth_width
+            blank = np.zeros((height, width, 3), dtype=np.uint8)
+            test = model(blank, width, height)
             if not np.isfinite(test).all():
                 raise RuntimeError("WebGPU warmup produced invalid depth")
-            logging.info("Depth: Limbo V3 / WebGPU (CPU fallback disabled), warmup %.2f s", time.monotonic() - start)
+            if args.webgpu_graph_capture:
+                pattern = np.random.default_rng(40).integers(0, 256, blank.shape, dtype=np.uint8)
+                changed = model(pattern, width, height)
+                repeated = model(blank, width, height)
+                if (not np.isfinite(changed).all() or np.allclose(test, changed)
+                        or not np.allclose(test, repeated, rtol=.005, atol=.005)):
+                    raise RuntimeError("WebGPU graph capture failed the changing-input check")
+            logging.info("Depth: Limbo V3 / WebGPU (CPU fallback disabled), capture=%s, warmup %.2f s",
+                         args.webgpu_graph_capture, time.monotonic() - start)
         else:
             logging.info("Depth: Limbo V3 / ONNX Runtime CPU")
     else:
