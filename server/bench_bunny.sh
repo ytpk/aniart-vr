@@ -52,7 +52,8 @@ sample_gpu() {
     {
         printf '%s\n' "$header"
         while true; do
-            row=$EPOCHREALTIME
+            # Bash can use a decimal comma in EPOCHREALTIME under LC_NUMERIC.
+            row=${EPOCHREALTIME/,/.}
             for sensor in "${sensors[@]}"; do
                 IFS= read -r value 2>/dev/null < "$sensor" || value=
                 row+=",$value"
