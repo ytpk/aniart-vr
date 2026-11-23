@@ -37,27 +37,43 @@ class Limbo:
 
 
 class OnnxLimbo:
-    def __init__(self, checkpoint, width, height):
+    def __init__(self, checkpoint, width, height, device="cpu"):
         import cv2
         import onnxruntime as ort
 
         options = ort.SessionOptions()
         options.intra_op_num_threads = 4
-        self.session = ort.InferenceSession(checkpoint, options, providers=["CPUExecutionProvider"])
+        if device == "webgpu":
+            import onnxruntime_ep_webgpu as webgpu
+
+            ort.register_execution_provider_library("aniart_webgpu", webgpu.get_library_path())
+            gpu = next((d for d in ort.get_ep_devices() if d.ep_name == webgpu.get_ep_name()), None)
+            if gpu is None:
+                raise RuntimeError("ONNX WebGPU did not find a compatible Vulkan GPU")
+            options.add_session_config_entry("session.disable_cpu_ep_fallback", "1")
+            options.add_provider_for_devices([gpu], {"powerPreference": "high-performance"})
+            self.session = ort.InferenceSession(checkpoint, sess_options=options)
+        else:
+            self.session = ort.InferenceSession(checkpoint, options, providers=["CPUExecutionProvider"])
         inputs = self.session.get_inputs()
         outputs = self.session.get_outputs()
+        input_types = {"tensor(float)": np.float32}
+        if device == "webgpu":
+            input_types["tensor(float16)"] = np.float16
         if (len(inputs) != 1 or inputs[0].shape != [1, 3, height, width]
-                or inputs[0].type != "tensor(float)" or not any(out.name == "depth" for out in outputs)):
-            raise ValueError(f"Expected a FP32 Limbo ONNX model with input 1×3×{height}×{width}")
+                or inputs[0].type not in input_types or not any(out.name == "depth" for out in outputs)):
+            raise ValueError(f"Unsupported Limbo ONNX input; expected 1×3×{height}×{width} and output depth")
         self.input_name = inputs[0].name
+        self.input_dtype = input_types[inputs[0].type]
         self.cv = cv2
         self.mean = np.array([.485, .456, .406], dtype=np.float32)
         self.std = np.array([.229, .224, .225], dtype=np.float32)
 
     def __call__(self, frame, width, height):
         image = self.cv.resize(frame.astype(np.float32), (width, height)) / 255
-        image = np.ascontiguousarray(((image - self.mean) / self.std).transpose(2, 0, 1)[None])
-        return self.session.run(["depth"], {self.input_name: image})[0].reshape(height, width)
+        image = np.ascontiguousarray(((image - self.mean) / self.std).transpose(2, 0, 1)[None],
+                                     dtype=self.input_dtype)
+        return self.session.run(["depth"], {self.input_name: image})[0].astype(np.float32, copy=False).reshape(height, width)
 
 
 class Stereo:

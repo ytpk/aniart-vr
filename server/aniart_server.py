@@ -233,7 +233,7 @@ def main():
     parser.add_argument("--checkpoint", required=True)
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8765)
-    parser.add_argument("--device", choices=("cpu", "cuda"), help="ONNX defaults to CPU, safetensors defaults to ROCm")
+    parser.add_argument("--device", choices=("cpu", "cuda", "webgpu"), help="ONNX uses CPU or WebGPU; safetensors use PyTorch")
     parser.add_argument("--vulkan-device", type=int, help="Vulkan device index; by default libplacebo selects one")
     parser.add_argument("--decode-device")
     parser.add_argument("--encode-device")
@@ -260,10 +260,20 @@ def main():
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
     if Path(args.checkpoint).suffix.lower() == ".onnx":
         if args.device == "cuda":
-            parser.error("ONNX Limbo uses CPU; omit --device or use --device cpu")
-        model = OnnxLimbo(args.checkpoint, args.depth_width, args.depth_height)
-        logging.info("Depth: Limbo V3 / ONNX Runtime CPU")
+            parser.error("Use --device webgpu or cpu for an ONNX model")
+        model = OnnxLimbo(args.checkpoint, args.depth_width, args.depth_height, args.device or "cpu")
+        if args.device == "webgpu":
+            start = time.monotonic()
+            test = model(np.zeros((args.depth_height, args.depth_width, 3), dtype=np.uint8),
+                         args.depth_width, args.depth_height)
+            if not np.isfinite(test).all():
+                raise RuntimeError("WebGPU warmup produced invalid depth")
+            logging.info("Depth: Limbo V3 / WebGPU (CPU fallback disabled), warmup %.2f s", time.monotonic() - start)
+        else:
+            logging.info("Depth: Limbo V3 / ONNX Runtime CPU")
     else:
+        if args.device == "webgpu":
+            parser.error("--device webgpu requires a Limbo .onnx checkpoint")
         model = Limbo(args.checkpoint, args.device or "cuda")
     with Server(args, model) as server:
         logging.info("Listening on %s:%d", args.host, args.port)

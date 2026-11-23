@@ -62,3 +62,20 @@ python aniart_server.py --host "$PC_IP" --checkpoint models/Limbo.onnx --depth-e
 ```
 
 Задайте `PC_IP` и `ANIART_PC_TOKEN` как в разделе запуска. ONNX фиксирован на 504×280. Отключите `--encode-device`, если кодирование VAAPI ещё не настроено.
+
+### Глубина на Radeon через WebGPU без ROCm
+
+Экспериментальный режим. Python 3.12 использует ONNX Runtime и загружаемый
+провайдер WebGPU. На Linux провайдер выполняет операции через Vulkan. Сервер
+запрещает CPU fallback и проверяет конечность карты при запуске. Если GPU
+не поддерживает нужный оператор, сервер остановится с ошибкой ONNX Runtime.
+
+```sh
+python -m pip install 'onnxruntime==1.27.0' 'onnxruntime-ep-webgpu==0.6.0'
+curl -fL 'https://raw.githubusercontent.com/NevermindNilas/Ai-models/4c0950ecc08629cda85754d0766d6deb2e95495a/Limbo-V3/Limbo_504x280_fp16.onnx' -o models/Limbo-fp16.onnx
+printf '%s  %s\n' '19e1de53564bc1c84e47acbf98897e7ceb2db2e607661e3bf0997cd7272d7482' models/Limbo-fp16.onnx | sha256sum -c -
+ANIART_DEPTH_SWEEP=1 ANIART_BENCH_DEPTH_DEVICE=webgpu bash bench_bunny.sh models/Limbo-fp16.onnx
+```
+
+Режим рабочей сессии выбирается флагом `--device webgpu`. Тот же флаг принимает
+исходный FP32 ONNX для сравнения. Anime4K и VAAPI используют прежние настройки.

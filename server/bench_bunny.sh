@@ -134,7 +134,7 @@ run_profile() {
 
 if [[ "${ANIART_DEPTH_SWEEP:-0}" == 1 ]]; then
     for interval in 6 3 2; do
-        run_profile "depth-every-$interval" "$interval" --encode-device "$device"
+        run_profile "depth-every-$interval" "$interval" --encode-device "$device"             --device "${ANIART_BENCH_DEPTH_DEVICE:-cpu}"
     done
     exit 0
 fi
